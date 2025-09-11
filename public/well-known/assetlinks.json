@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.netlify.graceful_klepon_249c2f.twa",
+      "sha256_cert_fingerprints": [
+        "63:D0:DA:2D:62:AC:80:00:21:5F:EA:40:FA:A3:E3:3B:1D:F8:89:D8:87:4A:99:BD:2C:FD:64:5C:66:22:FE:92"
+      ]
+    }
+  }
+]
