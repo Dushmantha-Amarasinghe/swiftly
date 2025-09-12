@@ -17,6 +17,7 @@ import {
   deleteDoc,
   arrayUnion,
   arrayRemove,
+  increment,
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import {
@@ -800,22 +801,6 @@ export default function ChatShell({ me, meProfile, onLogout }) {
     return unsub;
   }, [activeRoomId, view]);
 
-  // mark as read
-  useEffect(() => {
-    if (!activeRoomId || view !== "chats" || !messages.length) return;
-    const unread = messages.filter(
-      (m) => m.senderId !== me.uid && !(m.readBy || []).includes(me.uid)
-    );
-    unread.forEach(async (m) => {
-      try {
-        await updateDoc(doc(db, "rooms", activeRoomId, "messages", m.id), {
-          readBy: arrayUnion(me.uid),
-        });
-      } catch (e) {
-        console.error("read receipt update failed", e);
-      }
-    });
-  }, [messages, activeRoomId, view, me.uid]);
 
   // scroll watcher
   useEffect(() => {
@@ -928,29 +913,96 @@ export default function ChatShell({ me, meProfile, onLogout }) {
     const t = text.trim();
     if (!t || !activeRoomId) return;
     setSending(true);
+
     try {
-      await addDoc(collection(db, "rooms", activeRoomId, "messages"), {
+      const roomRef = doc(db, "rooms", activeRoomId);
+
+      await addDoc(collection(roomRef, "messages"), {
         senderId: me.uid,
         type: "text",
         text: t.slice(0, 4000),
-        replyTo: replyTo?.id || null, // 👈 link reply reference
+        replyTo: replyTo?.id || null,
         createdAt: serverTimestamp(),
+        readBy: [me.uid],
       });
-      await updateDoc(doc(db, "rooms", activeRoomId), {
+
+      const snap = await getDoc(roomRef);
+      const data = snap.data();
+
+      // Prepare updates
+      const updates = {
         lastMessageAt: serverTimestamp(),
         lastMessagePreview: t.slice(0, 80),
+      };
+
+      // Loop over all members
+      (data.memberIds || []).forEach((uid) => {
+        if (uid === me.uid) {
+          // creator/author always reset to 0
+          updates[`unread.${uid}`] = 0;
+        } else {
+          // everyone else → increment
+          updates[`unread.${uid}`] = increment(1);
+        }
       });
+
+      await updateDoc(roomRef, updates);
+
       setText("");
       setShowSendButton(false);
-      setReplyTo(null); // clear reply
-      if (listRef.current)
+      setReplyTo(null);
+
+      if (listRef.current) {
         setTimeout(() => {
           listRef.current.scrollTop = listRef.current.scrollHeight;
         }, 0);
+      }
     } finally {
       setSending(false);
     }
   }
+
+  async function resetUnread(roomId, uid) {
+    if (!roomId || !uid) return;
+    try {
+      await updateDoc(doc(db, "rooms", roomId), {
+        [`unread.${uid}`]: 0,
+      });
+    } catch (e) {
+      console.error("resetUnread failed", e);
+    }
+  }
+
+  
+
+  const isActiveViewer =
+    activeRoom &&
+    activeRoomId === activeRoom.id &&
+    view === "chats" &&
+    document.visibilityState === "visible" &&
+    document.hasFocus();
+
+  const myUnread = isActiveViewer ? 0 : activeRoom?.unread?.[me.uid] || 0;
+
+  useEffect(() => {
+    if (!activeRoomId || view !== "chats") return;
+
+    const tryResetUnread = () => {
+      if (document.visibilityState === "visible" && document.hasFocus()) {
+        if ((activeRoom?.unread?.[me.uid] || 0) > 0) {
+          resetUnread(activeRoomId, me.uid);
+        }
+      }
+    };
+
+    window.addEventListener("focus", tryResetUnread);
+    document.addEventListener("visibilitychange", tryResetUnread);
+
+    return () => {
+      window.removeEventListener("focus", tryResetUnread);
+      document.removeEventListener("visibilitychange", tryResetUnread);
+    };
+  }, [activeRoomId, view, me.uid]);
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -1286,6 +1338,42 @@ export default function ChatShell({ me, meProfile, onLogout }) {
     return () => window.removeEventListener("popstate", handlePop);
   }, [view, activeRoomId, showProfile]);
 
+
+useEffect(() => {
+  if (!activeRoomId || view !== "chats") return;
+
+  const tryMarkAsRead = () => {
+    if (document.visibilityState === "visible" && document.hasFocus()) {
+      // Reset unread bubble
+      if ((activeRoom?.unread?.[me.uid] || 0) > 0) {
+        resetUnread(activeRoomId, me.uid);
+      }
+
+      // Mark per-message receipts
+      const unread = messages.filter(
+        (m) => m.senderId !== me.uid && !(m.readBy || []).includes(me.uid)
+      );
+
+      unread.forEach(async (m) => {
+        try {
+          await updateDoc(doc(db, "rooms", activeRoomId, "messages", m.id), {
+            readBy: arrayUnion(me.uid),
+          });
+        } catch {}
+      });
+    }
+  };
+
+  tryMarkAsRead(); // run immediately if conditions are valid
+  window.addEventListener("focus", tryMarkAsRead);
+  document.addEventListener("visibilitychange", tryMarkAsRead);
+
+  return () => {
+    window.removeEventListener("focus", tryMarkAsRead);
+    document.removeEventListener("visibilitychange", tryMarkAsRead);
+  };
+}, [messages, activeRoomId, view, me.uid, activeRoom?.unread]);
+
   // ----------------- UI -----------------
   return (
     <div
@@ -1390,28 +1478,46 @@ export default function ChatShell({ me, meProfile, onLogout }) {
           ) : (
             <ul className="divide-y divide-gray-700">
               {rooms.map((r) => {
+                // --- Room basics ---
                 const active = r.id === activeRoomId && view === "chats";
                 const title = roomTitle(r);
                 const avatar = roomAvatar(r);
                 const time = formatTime(r.lastMessageAt);
                 const last = r.lastMessagePreview || "";
+
+                // --- DM peer presence ---
                 const pid =
                   r.type === "dm"
                     ? r.memberIds?.find((id) => id !== me.uid)
                     : null;
                 const isOnline = pid && presence[pid]?.state === "online";
+
+                // --- Unread logic ---
+                const isActiveViewer =
+                  r.id === activeRoomId &&
+                  view === "chats" &&
+                  document.visibilityState === "visible" &&
+                  document.hasFocus();
+
+                const myUnread = isActiveViewer ? 0 : r.unread?.[me.uid] || 0;
+
                 return (
                   <li
                     key={r.id}
                     className={`flex items-center gap-4 p-4 hover:bg-gray-700/50 cursor-pointer ${
                       active ? "bg-blue-500/20" : ""
                     }`}
+                    aria-current={active ? "page" : undefined}
                     onClick={() => {
                       setView("chats");
                       setActiveRoomId(r.id);
                       setShowProfile(false);
+                      if (!isMobile) {
+                        setTimeout(() => inputRef.current?.focus(), 0);
+                      }
                     }}
                   >
+                    {/* Avatar */}
                     <div className="relative flex-shrink-0">
                       {avatar ? (
                         <img
@@ -1432,6 +1538,8 @@ export default function ChatShell({ me, meProfile, onLogout }) {
                         <div className="absolute bottom-[2px] right-[2px] h-3 w-3 rounded-full bg-emerald-400 ring-2 ring-[#1f2b38]" />
                       )}
                     </div>
+
+                    {/* Details */}
                     <div className="flex-1 min-w-0">
                       <div className="flex justify-between items-center">
                         <h3 className="font-semibold truncate">{title}</h3>
@@ -1439,13 +1547,24 @@ export default function ChatShell({ me, meProfile, onLogout }) {
                           {time}
                         </p>
                       </div>
+
                       <div className="flex justify-between items-center mt-1">
+                        {/* Last message preview */}
                         <p className="text-sm text-gray-300 truncate">
                           {last || "Say hi 👋"}
                         </p>
-                        {!!r.unread && (
-                          <span className="bg-blue-500 text-white text-xs font-bold px-2 py-1 rounded-full flex-shrink-0 ml-2">
-                            {r.unread}
+
+                        {/* Unread counter badge */}
+                        {myUnread > 0 && (
+                          <span
+                            className="bg-blue-500 text-white text-[11px] font-medium px-[6px] min-w-[20px] h-5 flex items-center justify-center rounded-full ml-2"
+                            aria-label={`${myUnread} unread messages`}
+                          >
+                            {myUnread > 999
+                              ? "999+"
+                              : myUnread > 50
+                              ? "50+"
+                              : myUnread}
                           </span>
                         )}
                       </div>
