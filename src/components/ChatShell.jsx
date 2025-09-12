@@ -258,7 +258,19 @@ export default function ChatShell({ me, meProfile, onLogout }) {
   const [replyTo, setReplyTo] = useState(null);
   const [contextMenuMessageId, setContextMenuMessageId] = useState(null);
 
+  // common reply handler
+  function handleReplyTo(message) {
+    setReplyTo(message);
+    setContextMenuMessageId(null); // close context menu if opened
+    // wait a tick so React renders reply bar above composer, then focus input
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
   let touchStartX = 0;
+  let touchStartY = 0;
+  let touchMoveX = 0;
+  let touchMoveY = 0;
+  let gestureLocked = false;
   let holdTimer = null;
 
   // close menu when clicking outside
@@ -356,8 +368,6 @@ export default function ChatShell({ me, meProfile, onLogout }) {
     message: null,
   });
 
-
-  
   // group add
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [groupName, setGroupName] = useState("");
@@ -1240,42 +1250,41 @@ export default function ChatShell({ me, meProfile, onLogout }) {
     }
   };
 
+  useEffect(() => {
+    // push a state whenever important navigation changes
+    const state = {
+      view,
+      activeRoomId,
+      showProfile,
+      profileViewUid,
+    };
+    window.history.pushState(state, "");
+  }, [view, activeRoomId, showProfile, profileViewUid]);
 
   useEffect(() => {
-  // push a state whenever important navigation changes
-  const state = {
-    view,
-    activeRoomId,
-    showProfile,
-    profileViewUid,
-  };
-  window.history.pushState(state, "");
-}, [view, activeRoomId, showProfile, profileViewUid]);
+    const handlePop = (e) => {
+      e.preventDefault();
 
-useEffect(() => {
-  const handlePop = (e) => {
-    e.preventDefault();
+      // Pop state handling:
+      if (showProfile) {
+        // if currently showing profile → close it
+        setShowProfile(false);
+      } else if (activeRoomId) {
+        // if in a chat → back to chat list
+        setActiveRoomId(null);
+        setView("chats");
+      } else if (view !== "chats") {
+        // if in settings → go to chat list
+        setView("chats");
+      } else {
+        // already in chat list → exit app (or stay)
+        console.log("At root, let Android close app");
+      }
+    };
 
-    // Pop state handling:
-    if (showProfile) {
-      // if currently showing profile → close it
-      setShowProfile(false);
-    } else if (activeRoomId) {
-      // if in a chat → back to chat list
-      setActiveRoomId(null);
-      setView("chats");
-    } else if (view !== "chats") {
-      // if in settings → go to chat list
-      setView("chats");
-    } else {
-      // already in chat list → exit app (or stay)
-      console.log("At root, let Android close app");
-    }
-  };
-
-  window.addEventListener("popstate", handlePop);
-  return () => window.removeEventListener("popstate", handlePop);
-}, [view, activeRoomId, showProfile]);
+    window.addEventListener("popstate", handlePop);
+    return () => window.removeEventListener("popstate", handlePop);
+  }, [view, activeRoomId, showProfile]);
 
   // ----------------- UI -----------------
   return (
@@ -1810,10 +1819,7 @@ useEffect(() => {
                                 } bg-[#1f2b38] border border-gray-700 rounded shadow-lg z-50`}
                               >
                                 <button
-                                  onClick={() => {
-                                    setReplyTo(m);
-                                    setContextMenuMessageId(null);
-                                  }}
+                                  onClick={() => handleReplyTo(m)}
                                   className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm"
                                 >
                                   Reply
@@ -2339,13 +2345,6 @@ useEffect(() => {
                   const isReadByPeer =
                     !isGroup && !!peerId && (m.readBy || []).includes(peerId);
 
-                  // Track gesture state per message
-                  let touchStartX = 0;
-                  let touchMoveX = 0;
-                  let holdTimer = null;
-                  const threshold = 50; // px before reply triggers
-                  const holdDuration = 500; // 1.5s
-
                   return (
                     <div
                       key={m.id}
@@ -2354,29 +2353,55 @@ useEffect(() => {
                       }`}
                       onTouchStart={(e) => {
                         touchStartX = e.touches[0].clientX;
+                        touchStartY = e.touches[0].clientY;
                         touchMoveX = 0;
+                        touchMoveY = 0;
+                        gestureLocked = null; // reset gesture type
 
-                        // Long press timer (1.5s hold)
+                        // Prepare long press
                         holdTimer = setTimeout(() => {
                           setDeleteConfirm({ open: true, message: m });
-                        }, holdDuration); // e.g. const holdDuration = 1500;
+                        }, holdDuration);
                       }}
                       onTouchMove={(e) => {
-                        clearTimeout(holdTimer); // cancel hold if swiping
-                        touchMoveX = e.touches[0].clientX - touchStartX;
+                        clearTimeout(holdTimer);
 
-                        // apply swipe transform
-                        const bubble = document.getElementById(
-                          `bubble-${m.id}`
-                        );
-                        if (bubble) {
-                          bubble.style.transform = `translateX(${touchMoveX}px)`;
+                        touchMoveX = e.touches[0].clientX - touchStartX;
+                        touchMoveY = e.touches[0].clientY - touchStartY;
+
+                        // If gesture type not decided yet
+                        if (gestureLocked === null) {
+                          if (Math.abs(touchMoveY) > Math.abs(touchMoveX)) {
+                            gestureLocked = "vertical"; // scrolling → ignore swipes
+                          } else if (Math.abs(touchMoveX) > 10) {
+                            gestureLocked = "horizontal"; // horizontal intent
+                          }
+                        }
+
+                        if (gestureLocked === "vertical") {
+                          return; // 🚫 ignore swipe, let scroll happen
+                        }
+
+                        if (gestureLocked === "horizontal") {
+                          const maxSwipe = 60; // limit bubble travel
+                          const limitedMoveX = Math.max(
+                            -maxSwipe,
+                            Math.min(maxSwipe, touchMoveX)
+                          );
+                          const bubble = document.getElementById(
+                            `bubble-${m.id}`
+                          );
+                          if (bubble) {
+                            bubble.style.transform = `translateX(${limitedMoveX}px)`;
+                          }
                         }
                       }}
                       onTouchEnd={(e) => {
                         clearTimeout(holdTimer);
 
-                        // Reset bubble visual
+                        const diffX = e.changedTouches[0].clientX - touchStartX;
+                        const diffY = e.changedTouches[0].clientY - touchStartY;
+
                         const bubble = document.getElementById(
                           `bubble-${m.id}`
                         );
@@ -2388,11 +2413,19 @@ useEffect(() => {
                           }, 200);
                         }
 
-                        // Check swipe threshold
-                        const diffX = e.changedTouches[0].clientX - touchStartX;
-                        if (diffX < -threshold) {
-                          setReplyTo(m); // swipe left -> reply
+                        // Only trigger swipe action if gesture was horizontal
+                        if (gestureLocked === "horizontal") {
+                          const triggerThreshold = 40;
+
+                          if (diffX <= -triggerThreshold) {
+                            handleReplyTo(m); // left → reply
+                          } else if (diffX >= triggerThreshold) {
+                            setDeleteConfirm({ open: true, message: m }); // right → delete
+                          }
                         }
+
+                        // Reset gesture lock
+                        gestureLocked = null;
                       }}
                     >
                       <div
@@ -2543,6 +2576,7 @@ useEffect(() => {
           >
             {/* Always show mic button, changes function when recording */}
             <button
+              data-ignore-keep-kb
               className="p-3 rounded-full hover:bg-gray-700 flex items-center justify-center transition-all duration-200 hover:scale-110"
               onClick={recording ? cancelRecording : toggleRecord}
             >
@@ -2622,6 +2656,7 @@ useEffect(() => {
               </label>
             ) : (
               <button
+                data-ignore-keep-kb
                 onClick={finalizeRecording}
                 className="p-3 rounded-full bg-green-600 hover:bg-green-700 flex items-center justify-center transition-all duration-300 hover:scale-110"
                 title="Send recording"
@@ -2634,7 +2669,10 @@ useEffect(() => {
 
             {/* Floating vertical recording panel with enhanced features */}
             {recording && (
-              <div className="absolute bottom-20 right-4 flex flex-col items-center gap-4 px-2 py-3 rounded-2xl bg-[#223749]/90 backdrop-blur-md shadow-2xl border border-blue-500 animate-fadeIn z-50">
+              <div
+                data-ignore-keep-kb
+                className="absolute bottom-20 right-4 flex flex-col items-center gap-4 px-2 py-3 rounded-2xl bg-[#223749]/90 backdrop-blur-md shadow-2xl border border-blue-500 animate-fadeIn z-50"
+              >
                 {/* Visual indicator and timer */}
                 <div className="flex flex-col items-center gap-2">
                   {/* Recording status indicator */}
@@ -3457,91 +3495,101 @@ useEffect(() => {
       )}
 
       {deleteConfirm.open && deleteConfirm.message && (
-  <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-    <div className="bg-[#1f2b38] rounded-xl shadow-2xl w-full max-w-sm border border-gray-700 animate-fadeIn">
-      <div className="p-6 text-center">
-        <div className="mx-auto flex items-center justify-center w-12 h-12 rounded-full bg-red-500/20 mb-4">
-          <span className="material-symbols-outlined text-red-400 text-3xl">
-            delete
-          </span>
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-[#1f2b38] rounded-xl shadow-2xl w-full max-w-sm border border-gray-700 animate-fadeIn">
+            <div className="p-6 text-center">
+              <div className="mx-auto flex items-center justify-center w-12 h-12 rounded-full bg-red-500/20 mb-4">
+                <span className="material-symbols-outlined text-red-400 text-3xl">
+                  delete
+                </span>
+              </div>
+              <h3 className="text-lg font-semibold text-white mb-2">
+                Delete Message
+              </h3>
+              <p className="text-sm text-gray-300 mb-6">
+                Are you sure you want to delete this message for everyone?
+              </p>
+              <div className="flex gap-3 justify-center">
+                {/* Cancel */}
+                <button
+                  onClick={() =>
+                    setDeleteConfirm({ open: false, message: null })
+                  }
+                  className="flex-1 py-2 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200"
+                >
+                  Cancel
+                </button>
+
+                {/* Confirm Delete */}
+                <button
+                  onClick={async () => {
+                    const msg = deleteConfirm.message;
+
+                    // 1️⃣ If this is media → delete from Supabase storage
+                    const mediaUrl =
+                      msg.type === "image"
+                        ? msg.imageUrl
+                        : msg.type === "audio"
+                        ? msg.audioUrl
+                        : null;
+
+                    if (mediaUrl) {
+                      try {
+                        await deleteMediaFiles([mediaUrl]); // 👈 use your helper
+                        console.log("Deleted media file:", mediaUrl);
+                      } catch (err) {
+                        console.error(
+                          "Failed to delete media from Supabase:",
+                          err
+                        );
+                      }
+                    }
+
+                    // 2️⃣ Delete Firestore message doc
+                    await deleteDoc(
+                      doc(db, "rooms", activeRoomId, "messages", msg.id)
+                    );
+
+                    // 3️⃣ Update last preview in room doc
+                    const q = query(
+                      collection(db, "rooms", activeRoomId, "messages"),
+                      orderBy("createdAt", "desc"),
+                      limit(1)
+                    );
+                    const snap = await getDocs(q);
+
+                    if (!snap.empty) {
+                      const lastMsg = snap.docs[0].data();
+                      await updateDoc(doc(db, "rooms", activeRoomId), {
+                        lastMessageAt: lastMsg.createdAt || serverTimestamp(),
+                        lastMessagePreview:
+                          lastMsg.type === "text"
+                            ? lastMsg.text.slice(0, 80)
+                            : lastMsg.type === "image"
+                            ? "📷 Photo"
+                            : lastMsg.type === "audio"
+                            ? "🎤 Voice"
+                            : "Message",
+                      });
+                    } else {
+                      // no messages left
+                      await updateDoc(doc(db, "rooms", activeRoomId), {
+                        lastMessageAt: serverTimestamp(),
+                        lastMessagePreview: "",
+                      });
+                    }
+
+                    setDeleteConfirm({ open: false, message: null });
+                  }}
+                  className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
-        <h3 className="text-lg font-semibold text-white mb-2">Delete Message</h3>
-        <p className="text-sm text-gray-300 mb-6">
-          Are you sure you want to delete this message for everyone?
-        </p>
-        <div className="flex gap-3 justify-center">
-          {/* Cancel */}
-          <button
-            onClick={() => setDeleteConfirm({ open: false, message: null })}
-            className="flex-1 py-2 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200"
-          >
-            Cancel
-          </button>
-
-          {/* Confirm Delete */}
-          <button
-            onClick={async () => {
-              const msg = deleteConfirm.message;
-
-              // 1️⃣ If this is media → delete from Supabase storage
-              const mediaUrl =
-                msg.type === "image" ? msg.imageUrl :
-                msg.type === "audio" ? msg.audioUrl : null;
-
-              if (mediaUrl) {
-                try {
-                  await deleteMediaFiles([mediaUrl]); // 👈 use your helper
-                  console.log("Deleted media file:", mediaUrl);
-                } catch (err) {
-                  console.error("Failed to delete media from Supabase:", err);
-                }
-              }
-
-              // 2️⃣ Delete Firestore message doc
-              await deleteDoc(
-                doc(db, "rooms", activeRoomId, "messages", msg.id)
-              );
-
-              // 3️⃣ Update last preview in room doc
-              const q = query(
-                collection(db, "rooms", activeRoomId, "messages"),
-                orderBy("createdAt", "desc"),
-                limit(1)
-              );
-              const snap = await getDocs(q);
-
-              if (!snap.empty) {
-                const lastMsg = snap.docs[0].data();
-                await updateDoc(doc(db, "rooms", activeRoomId), {
-                  lastMessageAt: lastMsg.createdAt || serverTimestamp(),
-                  lastMessagePreview:
-                    lastMsg.type === "text"
-                      ? lastMsg.text.slice(0, 80)
-                      : lastMsg.type === "image"
-                      ? "📷 Photo"
-                      : lastMsg.type === "audio"
-                      ? "🎤 Voice"
-                      : "Message",
-                });
-              } else {
-                // no messages left
-                await updateDoc(doc(db, "rooms", activeRoomId), {
-                  lastMessageAt: serverTimestamp(),
-                  lastMessagePreview: "",
-                });
-              }
-
-              setDeleteConfirm({ open: false, message: null });
-            }}
-            className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white"
-          >
-            Delete
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-)}
+      )}
 
       {/* Attach (backdrop no-close) */}
       {attachModal && (
