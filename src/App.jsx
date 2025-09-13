@@ -8,6 +8,12 @@ import SignIn from './components/SignIn';
 import ProfileSetup from './components/ProfileSetup';
 import ChatShell from './components/ChatShell';
 
+import { requestNotificationPermission } from "./lib/notifications";
+import { onMessage } from "firebase/messaging";
+import { messaging } from "./lib/firebase";
+
+
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
@@ -82,6 +88,26 @@ export default function App() {
       window.removeEventListener('offline', onOffline);
     };
   }, [user?.uid]);
+
+  useEffect(() => {
+  if (user) {
+    // ask once logged in
+    requestNotificationPermission(user);
+  }
+}, [user]);
+
+useEffect(() => {
+  const unsub = onMessage(messaging, (payload) => {
+    // console.log("Foreground push", payload);
+
+    // new Notification(payload.notification?.title, {
+    //   body: payload.notification?.body,
+    //   icon: "/logo-swiftly.svg"
+    // });
+  });
+
+  return unsub;
+}, []);
 
   const signInGoogle = async () => {
     try {

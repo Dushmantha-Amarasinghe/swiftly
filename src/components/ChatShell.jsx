@@ -910,57 +910,88 @@ export default function ChatShell({ me, meProfile, onLogout }) {
   }
 
   async function sendMessage() {
-    const t = text.trim();
-    if (!t || !activeRoomId) return;
-    setSending(true);
+  const t = text.trim();
+  if (!t || !activeRoomId) return;
+  setSending(true);
 
-    try {
-      const roomRef = doc(db, "rooms", activeRoomId);
+  try {
+    const roomRef = doc(db, "rooms", activeRoomId);
 
-      await addDoc(collection(roomRef, "messages"), {
-        senderId: me.uid,
-        type: "text",
-        text: t.slice(0, 4000),
-        replyTo: replyTo?.id || null,
-        createdAt: serverTimestamp(),
-        readBy: [me.uid],
-      });
+    // Save the message
+    await addDoc(collection(roomRef, "messages"), {
+      senderId: me.uid,
+      type: "text",
+      text: t.slice(0, 4000),
+      replyTo: replyTo?.id || null,
+      createdAt: serverTimestamp(),
+      readBy: [me.uid],
+    });
 
-      const snap = await getDoc(roomRef);
-      const data = snap.data();
+    // Grab the room
+    const snap = await getDoc(roomRef);
+    const data = snap.data();
 
-      // Prepare updates
-      const updates = {
-        lastMessageAt: serverTimestamp(),
-        lastMessagePreview: t.slice(0, 80),
-      };
+    // Prepare updates for unread counters
+    const updates = {
+      lastMessageAt: serverTimestamp(),
+      lastMessagePreview: t.slice(0, 80),
+    };
 
-      // Loop over all members
-      (data.memberIds || []).forEach((uid) => {
-        if (uid === me.uid) {
-          // creator/author always reset to 0
-          updates[`unread.${uid}`] = 0;
-        } else {
-          // everyone else → increment
-          updates[`unread.${uid}`] = increment(1);
-        }
-      });
-
-      await updateDoc(roomRef, updates);
-
-      setText("");
-      setShowSendButton(false);
-      setReplyTo(null);
-
-      if (listRef.current) {
-        setTimeout(() => {
-          listRef.current.scrollTop = listRef.current.scrollHeight;
-        }, 0);
+    (data.memberIds || []).forEach((uid) => {
+      if (uid === me.uid) {
+        updates[`unread.${uid}`] = 0;
+      } else {
+        updates[`unread.${uid}`] = increment(1);
       }
-    } finally {
-      setSending(false);
+    });
+
+    await updateDoc(roomRef, updates);
+
+    // 👉 NEW: Gather FCM tokens of recipients
+    const recipientTokens = [];
+    for (const uid of data.memberIds || []) {
+      if (uid !== me.uid) {
+        const userSnap = await getDoc(doc(db, "profiles", uid));
+        if (userSnap.exists() && userSnap.data().fcmToken) {
+          recipientTokens.push(userSnap.data().fcmToken);
+        }
+      }
     }
+
+    // 👉 NEW: Call backend to send push
+    if (recipientTokens.length > 0) {
+      await fetch("https://testing4234.pythonanywhere.com/send", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    tokens: recipientTokens,
+    senderName: me.displayName || "Someone",
+    senderPhoto: me.photoURL,
+    roomId: activeRoomId,
+    roomTitle: data.title || "Group",
+    roomType: data.type, // "dm" or "group"
+    msgType: "text",     // "text" / "image" / "audio"
+    body: t              // the actual message text
+  }),
+});
+    }
+
+    // Reset UI
+    setText("");
+    setShowSendButton(false);
+    setReplyTo(null);
+
+    if (listRef.current) {
+      setTimeout(() => {
+        listRef.current.scrollTop = listRef.current.scrollHeight;
+      }, 0);
+    }
+  } catch (err) {
+    console.error("sendMessage failed:", err);
+  } finally {
+    setSending(false);
   }
+}
 
   async function resetUnread(roomId, uid) {
     if (!roomId || !uid) return;

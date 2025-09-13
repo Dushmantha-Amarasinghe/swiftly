@@ -2,6 +2,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getDatabase } from 'firebase/database';
+import { getMessaging } from "firebase/messaging";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -11,6 +12,8 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
   // Not always included by default – add it in .env.local
   databaseURL: import.meta.env.VITE_FIREBASE_DB_URL,
+  messagingSenderId: "251177712115",
+
 };
 
 const app = initializeApp(firebaseConfig);
@@ -26,3 +29,5 @@ export function makeGoogleProvider() {
   p.setCustomParameters({ prompt: 'select_account' });
   return p;
 }
+
+export const messaging = getMessaging(app);
