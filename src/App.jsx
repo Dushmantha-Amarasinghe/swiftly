@@ -1,12 +1,17 @@
-import { useEffect, useState } from 'react';
-import { auth, db, makeGoogleProvider, messaging } from './lib/firebase';
-import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
-import { setupPresence, updatePresence } from './lib/presence';
+import { useEffect, useState, useRef } from "react";
+import { auth, db, makeGoogleProvider, messaging } from "./lib/firebase";
+import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
+import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import {
+  setupPresence,
+  updatePresence,
+  goOfflineNow,
+  stopTyping,
+} from "./lib/presence";
 
-import SignIn from './components/SignIn';
-import ProfileSetup from './components/ProfileSetup';
-import ChatShell from './components/ChatShell';
+import SignIn from "./components/SignIn";
+import ProfileSetup from "./components/ProfileSetup";
+import ChatShell from "./components/ChatShell";
 
 import { requestNotificationPermission } from "./lib/notifications";
 import { onMessage } from "firebase/messaging";
@@ -18,29 +23,34 @@ export default function App() {
 
   // New: track which room to auto-open from SW
   const [pendingRoomId, setPendingRoomId] = useState(null);
+  const presenceCleanupRef = useRef(null);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       if (u) {
-        const ref = doc(db, 'profiles', u.uid);
+        const ref = doc(db, "profiles", u.uid);
         const snap = await getDoc(ref);
         if (!snap.exists()) {
-          const dn = u.displayName || '';
-          const [firstName, ...rest] = dn.split(' ');
-          const lastName = rest.join(' ');
-          await setDoc(ref, {
-            uid: u.uid,
-            email: u.email || null,
-            displayName: dn || null,
-            firstName: firstName || '',
-            lastName: lastName || '',
-            photoURL: u.photoURL || null,
-            setupComplete: false,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-            privacy: { showOnline: true, showReadReceipts: true },
-          }, { merge: true });
+          const dn = u.displayName || "";
+          const [firstName, ...rest] = dn.split(" ");
+          const lastName = rest.join(" ");
+          await setDoc(
+            ref,
+            {
+              uid: u.uid,
+              email: u.email || null,
+              displayName: dn || null,
+              firstName: firstName || "",
+              lastName: lastName || "",
+              photoURL: u.photoURL || null,
+              setupComplete: false,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+              privacy: { showOnline: true, showReadReceipts: true },
+            },
+            { merge: true }
+          );
           const fresh = await getDoc(ref);
           setProfile(fresh.data());
         } else {
@@ -57,34 +67,49 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
 
-    setupPresence(user.uid);
-    updatePresence(user.uid, 'online');
+    // 🔹 Start presence and SAVE cleanup
+    const presenceCleanup = setupPresence(user.uid);
 
-    const toOnline = () => updatePresence(user.uid, 'online');
-    const toAway = () => updatePresence(user.uid, 'away');
-    const toOffline = () => updatePresence(user.uid, 'offline');
+    // Mark online immediately
+    updatePresence(user.uid, "online");
+
+    // Event handlers for presence states
+    const toOnline = () => updatePresence(user.uid, "online");
+    const toAway = () => updatePresence(user.uid, "away");
+    const toOffline = () => updatePresence(user.uid, "offline");
 
     const onVis = () =>
-      updatePresence(user.uid, document.visibilityState === 'visible' ? 'online' : 'away');
+      updatePresence(
+        user.uid,
+        document.visibilityState === "visible" ? "online" : "away"
+      );
 
-    window.addEventListener('focus', toOnline);
-    window.addEventListener('blur', toAway);
-    document.addEventListener('visibilitychange', onVis);
-    window.addEventListener('beforeunload', toOffline);
+    // Add listeners
+    window.addEventListener("focus", toOnline);
+    window.addEventListener("blur", toAway);
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("beforeunload", toOffline);
 
     const onOnline = () => toOnline();
     const onOffline = () => toAway();
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
 
+    // 🔹 Cleanup
     return () => {
+      // Stop heartbeat + listeners set by setupPresence
+      if (presenceCleanup) presenceCleanup();
+
+      // Mark away just in case
       toAway();
-      window.removeEventListener('focus', toOnline);
-      window.removeEventListener('blur', toAway);
-      document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('beforeunload', toOffline);
-      window.removeEventListener('online', onOnline);
-      window.removeEventListener('offline', onOffline);
+
+      // Remove our attached listeners
+      window.removeEventListener("focus", toOnline);
+      window.removeEventListener("blur", toAway);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("beforeunload", toOffline);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
     };
   }, [user?.uid]);
 
@@ -121,12 +146,40 @@ export default function App() {
       const provider = makeGoogleProvider();
       await signInWithPopup(auth, provider);
     } catch (e) {
-      console.error('Google sign-in failed:', e);
-      alert(e.message || 'Sign-in failed');
+      console.error("Google sign-in failed:", e);
+      alert(e.message || "Sign-in failed");
     }
   };
 
-  if (loading) return <div className="h-screen grid place-items-center text-slate-400">Loading…</div>;
+  async function gracefulLogout() {
+    try {
+      if (user) {
+        // 1. Stop and cleanup presence heartbeat/listeners
+        if (presenceCleanupRef.current) {
+          presenceCleanupRef.current();
+          presenceCleanupRef.current = null;
+        }
+
+        // 2. If in a room, tell presence typing state to stop (optional)
+        // stopTyping(activeRoomId, user.uid);
+
+        // 3. Force "offline" immediately
+        await goOfflineNow(user.uid);
+      }
+    } catch (err) {
+      console.error("Presence cleanup error", err);
+    } finally {
+      // 4. Sign out from Firebase
+      await signOut(auth);
+    }
+  }
+
+  if (loading)
+    return (
+      <div className="h-screen grid place-items-center text-slate-400">
+        Loading…
+      </div>
+    );
   if (!user) return <SignIn onGoogle={signInGoogle} />;
 
   if (!profile || !profile.setupComplete) {
@@ -141,11 +194,10 @@ export default function App() {
   }
 
   return (
-    <ChatShell 
-      me={user} 
-      meProfile={profile} 
-      onLogout={() => signOut(auth)}
-      // 👉 Pass the roomId to ChatShell so it can auto-open after notification click:
+    <ChatShell
+      me={user}
+      meProfile={profile}
+      onLogout={gracefulLogout}
       initialRoomId={pendingRoomId}
     />
   );

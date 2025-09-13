@@ -829,12 +829,17 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
     return normalizeGooglePhotoURL(p?.photoURL || "", 56);
   }
 
+
   function getDMName(room) {
-    if (!room || room.type !== "dm") return "Unknown";
-    const peerId = room.memberIds?.find((id) => id !== me.uid);
-    const peerProfile = peerProfiles?.[peerId];
-    return peerProfile?.displayName || peerProfile?.username || "User";
-  }
+  if (!room || room.type !== "dm") return "Unknown";
+  const peerId = room.memberIds?.find(id => id !== me.uid);
+  const peerProfile = peerProfiles?.[peerId];
+  return (
+    peerProfile?.displayName ||
+    peerProfile?.username ||
+    "User"
+  );
+}
 
   const [groupSearchTerm, setGroupSearchTerm] = useState("");
   useEffect(() => {
@@ -1577,69 +1582,91 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
     };
   }, [messages, activeRoomId, view, me.uid, activeRoom?.unread]);
 
+
   async function handleForwardMessages() {
-    if (forwardTargets.length === 0) return;
+  if (forwardTargets.length === 0) return;
 
-    // Get selected messages
-    const msgsToForward = messages.filter((m) => selectedIds.includes(m.id));
+  // Get selected messages
+  const msgsToForward = messages.filter(m => selectedIds.includes(m.id));
 
-    // Close popup instantly
-    setForwardModalOpen(false);
-    setSelectMode(false);
-    setSelectedIds([]);
-    const targets = [...forwardTargets];
-    setForwardTargets([]);
+  // Close popup instantly
+  setForwardModalOpen(false);
+  setSelectMode(false);
+  setSelectedIds([]);
+  const targets = [...forwardTargets];
+  setForwardTargets([]);
 
-    // For each target room, insert forwarded copies
-    targets.forEach((targetId) => {
-      msgsToForward.forEach((msg) => {
-        const tempId = "fwd-" + Date.now() + "-" + Math.random();
+  // For each target room, insert forwarded copies
+  targets.forEach(targetId => {
+    msgsToForward.forEach(msg => {
+      const tempId = "fwd-" + Date.now() + "-" + Math.random();
 
-        // Optimistic add locally if this target is currently open
-        if (activeRoomId === targetId) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              ...msg,
-              id: tempId,
-              pending: true,
-              forward: true,
-              createdAt: new Date(),
-              readBy: [me.uid],
-            },
-          ]);
-        }
+      // Optimistic add locally if this target is currently open
+      if (activeRoomId === targetId) {
+        setMessages(prev => [
+          ...prev,
+          {
+            ...msg,
+            id: tempId,
+            pending: true,
+            forward: true,
+            createdAt: new Date(),
+            readBy: [me.uid],
+          },
+        ]);
+      }
 
-        // Background Firestore write
-        const roomRef = doc(db, "rooms", targetId);
-        addDoc(collection(roomRef, "messages"), {
-          senderId: me.uid,
-          type: msg.type,
-          text: msg.text || "",
-          imageUrl: msg.imageUrl || null,
-          audioUrl: msg.audioUrl || null,
-          forward: true,
-          forwardFrom: msg.senderId,
-          createdAt: serverTimestamp(),
-          readBy: [me.uid],
-        }).catch((e) => console.error("Forward failed:", e));
+      // Background Firestore write
+      const roomRef = doc(db, "rooms", targetId);
+      addDoc(collection(roomRef, "messages"), {
+        senderId: me.uid,
+        type: msg.type,
+        text: msg.text || "",
+        imageUrl: msg.imageUrl || null,
+        audioUrl: msg.audioUrl || null,
+        forward: true,
+        forwardFrom: msg.senderId,
+        createdAt: serverTimestamp(),
+        readBy: [me.uid],
+      }).catch(e => console.error("Forward failed:", e));
 
-        // Update room preview
-        updateDoc(roomRef, {
-          lastMessageAt: serverTimestamp(),
-          lastMessagePreview:
-            msg.type === "text"
-              ? msg.text.slice(0, 80)
-              : msg.type === "image"
-              ? "📷 Photo"
-              : msg.type === "audio"
-              ? "🎤 Voice"
-              : "Message",
-        });
+      // Update room preview
+      updateDoc(roomRef, {
+        lastMessageAt: serverTimestamp(),
+        lastMessagePreview:
+          msg.type === "text"
+            ? msg.text.slice(0, 80)
+            : msg.type === "image"
+            ? "📷 Photo"
+            : msg.type === "audio"
+            ? "🎤 Voice"
+            : "Message",
       });
     });
+  });
+}
+useEffect(() => {
+  if (!activeRoomId) return;
+
+  // …clear composer states etc…
+
+  try {
+    stopTyping(activeRoomId, me.uid); // no .catch() needed
+  } catch (err) {
+    console.error("stopTyping failed:", err);
   }
 
+  setIsTyping(false);
+  setText("");
+  setShowSendButton(false);
+  setReplyTo(null);
+  setSelectMode(false);
+  setSelectedIds([]);
+  setForwardModalOpen(false);
+  setDeleteConfirm({ open: false, message: null });
+  setExitingIds([]);
+
+}, [activeRoomId]);
   // ----------------- UI -----------------
   return (
     <div
@@ -2066,403 +2093,299 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
               </header>
 
               {/* Messages container with relative positioning for the scroll button */}
-              <div className="flex-1 min-h-0 overflow-hidden relative">
-                {/* Selection Mode Action Bar */}
-                {selectMode && (
-                  <div
-                    className="absolute top-0 left-0 right-0 z-50 bg-[#182533]/95 backdrop-blur-md
-                    border-b border-gray-700 flex items-center justify-between px-4 py-2 shadow-md"
-                  >
-                    <span className="text-white font-medium">
-                      {selectedIds.length} selected
-                    </span>
-                    <div className="flex gap-6">
-                      <button
-                        className="text-gray-300 hover:text-white transition"
-                        onClick={() => {
-                          setSelectMode(false);
-                          setSelectedIds([]);
-                        }}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        className="text-red-400 hover:text-red-500 font-medium transition"
-                        onClick={() => handleDeleteMessages(selectedIds)}
-                      >
-                        Delete
-                      </button>
-                      <button
-                        className="text-blue-400 hover:text-blue-500 font-medium transition"
-                        onClick={() => setForwardModalOpen(true)}
-                      >
-                        Forward
-                      </button>
-                    </div>
-                  </div>
-                )}
+<div className="flex-1 min-h-0 overflow-hidden relative">
 
-                {/* Messages List */}
-                <div
-                  ref={listRef}
-                  className={`h-full overflow-y-auto scrollbar-telegram p-4 lg:p-6 space-y-4 lg:space-y-6 
+  {/* Selection Mode Action Bar */}
+  {selectMode && (
+    <div className="absolute top-0 left-0 right-0 z-50 bg-[#182533]/95 backdrop-blur-md
+                    border-b border-gray-700 flex items-center justify-between px-4 py-2 shadow-md">
+      <span className="text-white font-medium">{selectedIds.length} selected</span>
+      <div className="flex gap-6">
+        <button
+          className="text-gray-300 hover:text-white transition"
+          onClick={() => {
+            setSelectMode(false);
+            setSelectedIds([]);
+          }}
+        >
+          Cancel
+        </button>
+        <button
+          className="text-red-400 hover:text-red-500 font-medium transition"
+          onClick={() => handleDeleteMessages(selectedIds)}
+        >
+          Delete
+        </button>
+        <button
+          className="text-blue-400 hover:text-blue-500 font-medium transition"
+          onClick={() => setForwardModalOpen(true)}
+        >
+          Forward
+        </button>
+      </div>
+    </div>
+  )}
+
+  {/* Messages List */}
+  <div
+    ref={listRef}
+    className={`h-full overflow-y-auto scrollbar-telegram p-4 lg:p-6 space-y-4 lg:space-y-6 
                 ${selectMode ? "pt-12" : ""}`}
-                >
-                  {messages.length === 0 ? (
-                    <div className="text-center text-gray-400 text-sm pt-8">
-                      No messages yet — say hello!
-                    </div>
-                  ) : (
-                    messages.map((m) => {
-                      const mine = m.senderId === me.uid;
-                      const isGroup = activeRoom?.type === "group";
-                      const senderProfile = isGroup
-                        ? peerProfiles[m.senderId]
-                        : null;
-                      const senderName =
-                        senderProfile?.displayName ||
-                        senderProfile?.username ||
-                        "Unknown";
-                      const isReadByPeer =
-                        !isGroup &&
-                        !!peerId &&
-                        (m.readBy || []).includes(peerId);
-                      const isSelected =
-                        selectMode && selectedIds.includes(m.id);
+  >
+    {messages.length === 0 ? (
+      <div className="text-center text-gray-400 text-sm pt-8">
+        No messages yet — say hello!
+      </div>
+    ) : (
+      messages.map((m) => {
+        const mine = m.senderId === me.uid;
+        const isGroup = activeRoom?.type === "group";
+        const senderProfile = isGroup ? peerProfiles[m.senderId] : null;
+        const senderName = senderProfile?.displayName || senderProfile?.username || "Unknown";
+        const isReadByPeer =
+          !isGroup && !!peerId && (m.readBy || []).includes(peerId);
+        const isSelected = selectMode && selectedIds.includes(m.id);
 
-                      return (
-                        <div
-                          key={m.id}
-                          className={`flex ${
-                            mine ? "justify-end" : "justify-start"
-                          } 
+        return (
+          <div
+            key={m.id}
+            className={`flex ${mine ? "justify-end" : "justify-start"} 
                         transition-transform duration-300 ease-in-out`}
-                          onContextMenu={(e) => {
-                            e.preventDefault();
-                            setContextMenuMessageId(m.id);
-                          }}
-                        >
-                          <div
-                            id={`bubble-${m.id}`}
-                            className={`relative max-w-[85%] sm:max-w-xs lg:max-w-md p-3 rounded-lg shadow-sm
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setContextMenuMessageId(m.id);
+            }}
+          >
+            <div
+              id={`bubble-${m.id}`}
+              className={`relative max-w-[85%] sm:max-w-xs lg:max-w-md p-3 rounded-lg shadow-sm
                 select-none transition-all duration-300 ease-in-out
-                ${
-                  mine
-                    ? "bg-blue-700 text-white rounded-br-none"
-                    : "bg-[#1f2b38] text-[#e0e0e0] rounded-bl-none border border-white/5"
-                }
+                ${mine
+                  ? "bg-blue-700 text-white rounded-br-none"
+                  : "bg-[#1f2b38] text-[#e0e0e0] rounded-bl-none border border-white/5"}
                 ${isSelected ? "ring-2 ring-blue-400 scale-[0.98]" : ""}
-                ${
-                  exitingIds.includes(m.id)
-                    ? "opacity-0 scale-95 translate-x-4"
-                    : "opacity-100 scale-100"
-                }
+                ${exitingIds.includes(m.id) ? "opacity-0 scale-95 translate-x-4" : "opacity-100 scale-100"}
               `}
-                            onClick={() => {
-                              if (selectMode) {
-                                setSelectedIds((prev) =>
-                                  prev.includes(m.id)
-                                    ? prev.filter((id) => id !== m.id)
-                                    : [...prev, m.id]
-                                );
-                              }
-                            }}
-                          >
-                            {/* Group Sender */}
-                            {isGroup && !mine && (
-                              <div className="text-xs font-medium text-gray-400 mb-1">
-                                {senderName}
-                              </div>
-                            )}
-
-                            {/* Reply Snippet */}
-                            {m.replyTo && (
-                              <div className="text-xs text-gray-400 border-l-2 border-blue-500 pl-2 mb-1">
-                                {messages.find((msg) => msg.id === m.replyTo)
-                                  ?.text ||
-                                  (messages.find((msg) => msg.id === m.replyTo)
-                                    ?.type === "image"
-                                    ? "📷 Photo"
-                                    : messages.find(
-                                        (msg) => msg.id === m.replyTo
-                                      )?.type === "audio"
-                                    ? "🎤 Voice"
-                                    : "Message")}
-                              </div>
-                            )}
-
-                            {/* Message body */}
-                            {m.type === "text" && (
-                              <p className="break-words">{m.text}</p>
-                            )}
-                            {m.type === "image" && (
-                              <div className="mt-1">
-                                <div className="relative group overflow-hidden rounded-lg bg-black/20 w-[240px] h-[180px] sm:w-[260px] sm:h-[195px]">
-                                  <img
-                                    src={m.imageUrl}
-                                    alt=""
-                                    loading="lazy"
-                                    className="absolute inset-0 h-full w-full object-cover cursor-pointer"
-                                    onClick={() =>
-                                      setLightbox({
-                                        open: true,
-                                        url: m.imageUrl,
-                                      })
-                                    }
-                                    referrerPolicy="no-referrer"
-                                  />
-                                  <a
-                                    href={m.imageUrl}
-                                    download
-                                    className="absolute top-2 right-2 opacity-0 group-hover:opacity-100
-                                 transition-opacity bg-black/60 text-white px-2 py-1 rounded text-xs"
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    Download
-                                  </a>
-                                </div>
-                              </div>
-                            )}
-                            {m.type === "audio" && (
-                              <div className="mt-1">
-                                <AudioBubble src={m.audioUrl} mine={mine} />
-                              </div>
-                            )}
-
-                            {/* Footer: ticks + timestamp */}
-                            <div
-                              className={`flex items-center justify-end gap-1 mt-1 ${
-                                mine ? "text-blue-200" : "text-gray-400"
-                              }`}
-                            >
-                              <p className="text-[10px]">
-                                {m.pending
-                                  ? "sending…"
-                                  : m.failed
-                                  ? "failed"
-                                  : formatTime(m.createdAt)}
-                              </p>
-                              {mine && !isGroup && (
-                                <>
-                                  {m.pending && (
-                                    <span className="material-symbols-outlined text-[14px] animate-spin">
-                                      autorenew
-                                    </span>
-                                  )}
-                                  {!m.pending && !m.failed && (
-                                    <span
-                                      className={`material-symbols-outlined text-[16px] leading-none 
-                          ${isReadByPeer ? "text-white" : ""}`}
-                                      title={
-                                        isReadByPeer ? "Read" : "Delivered"
-                                      }
-                                    >
-                                      {isReadByPeer ? "done_all" : "done"}
-                                    </span>
-                                  )}
-                                  {m.failed && (
-                                    <span className="material-symbols-outlined text-red-500 text-[16px]">
-                                      error
-                                    </span>
-                                  )}
-                                </>
-                              )}
-                            </div>
-
-                            {/* Context menu */}
-                            {contextMenuMessageId === m.id && !selectMode && (
-                              <div
-                                className={`absolute top-0 ${
-                                  mine ? "-left-28" : "-right-28"
-                                } 
-                              bg-[#1f2b38] border border-gray-700 rounded shadow-lg z-50 w-32`}
-                              >
-                                <button
-                                  onClick={() => {
-                                    handleReplyTo(m);
-                                    setContextMenuMessageId(null);
-                                  }}
-                                  className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm"
-                                >
-                                  Reply
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    setForwardModalOpen(true);
-                                    setSelectedIds([m.id]);
-                                    setSelectMode(true);
-                                    setContextMenuMessageId(null);
-                                  }}
-                                  className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm"
-                                >
-                                  Forward
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    setSelectMode(true);
-                                    setSelectedIds([m.id]);
-                                    setContextMenuMessageId(null);
-                                  }}
-                                  className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm"
-                                >
-                                  Select
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    setDeleteConfirm({
-                                      open: true,
-                                      message: m,
-                                    });
-                                    setContextMenuMessageId(null);
-                                  }}
-                                  className="block w-full text-left px-3 py-1 text-red-400 hover:bg-gray-700 text-sm"
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-
-                {/* Scroll-to-bottom button */}
-                {showScrollToBottom && (
-                  <button
-                    onClick={() => {
-                      if (listRef.current) {
-                        listRef.current.scrollTo({
-                          top: listRef.current.scrollHeight,
-                          behavior: "smooth",
-                        });
-                      }
-                    }}
-                    className="absolute right-6 bottom-10 z-30 bg-blue-400 hover:bg-blue-600 text-white rounded-full p-3 shadow-lg transition-all duration-300 flex items-center justify-center"
-                    aria-label="Scroll to bottom"
-                  >
-                    <span className="material-symbols-outlined text-lg">
-                      arrow_downward
-                    </span>
-                  </button>
-                )}
-              </div>
-
-              {/* Reply bar */}
-              {replyTo && (
-                <div className="flex items-center justify-between bg-[#223749]/80 backdrop-blur-md text-white px-4 py-2 border-b border-gray-600 animate-slideDown">
-                  <div className="truncate max-w-[80%]">
-                    <p className="text-xs text-gray-300">Replying to</p>
-                    <p className="text-sm truncate">
-                      {replyTo.text ||
-                        (replyTo.type === "image"
-                          ? "📷 Photo"
-                          : replyTo.type === "audio"
-                          ? "🎤 Voice"
-                          : "Message")}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setReplyTo(null)}
-                    className="text-gray-400 hover:text-white text-lg"
-                  >
-                    ✖
-                  </button>
+              onClick={() => {
+                if (selectMode) {
+                  setSelectedIds((prev) =>
+                    prev.includes(m.id)
+                      ? prev.filter((id) => id !== m.id)
+                      : [...prev, m.id]
+                  );
+                }
+              }}
+            >
+              {/* Group Sender */}
+              {isGroup && !mine && (
+                <div className="text-xs font-medium text-gray-400 mb-1">
+                  {senderName}
                 </div>
               )}
 
-              {/* Composer */}
-              <footer
-                className="flex items-center gap-2 p-2 border-t border-gray-700 bg-[#1f2b38] relative"
-                style={{
-                  paddingBottom: "max(env(safe-area-inset-bottom), 8px)",
-                }}
-                onPointerDownCapture={keepKbFocus}
-              >
-                {/* Mic / Cancel recording */}
-                <button
-                  className="p-3 rounded-full hover:bg-gray-700 flex items-center justify-center transition-all duration-200 hover:scale-110"
-                  onClick={recording ? cancelRecording : toggleRecord}
-                >
-                  <span className="material-symbols-outlined text-xl leading-none">
-                    {recording ? "close" : "mic"}
-                  </span>
-                </button>
+              {/* Reply Snippet */}
+              {m.replyTo && (
+                <div className="text-xs text-gray-400 border-l-2 border-blue-500 pl-2 mb-1">
+                  {messages.find((msg) => msg.id === m.replyTo)?.text ||
+                    (messages.find((msg) => msg.id === m.replyTo)?.type === "image"
+                      ? "📷 Photo"
+                      : messages.find((msg) => msg.id === m.replyTo)?.type === "audio"
+                      ? "🎤 Voice"
+                      : "Message")}
+                </div>
+              )}
 
-                {/* Text input */}
-                <input
-                  ref={inputRef}
-                  className="flex-1 bg-[#18222d] rounded-full px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                  placeholder="Type a message..."
-                  type="text"
-                  value={text}
-                  onChange={(e) => {
-                    setText(e.target.value);
-                    setShowSendButton(!!e.target.value.trim());
-                    if (!isTyping && activeRoomId) {
-                      startTyping(activeRoomId, me.uid);
-                      setIsTyping(true);
-                    }
-                    if (typingTimeout.current)
-                      clearTimeout(typingTimeout.current);
-                    typingTimeout.current = setTimeout(() => {
-                      if (activeRoomId) stopTyping(activeRoomId, me.uid);
-                      setIsTyping(false);
-                    }, 3000);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      if (text.trim()) {
-                        sendMessage(text.trim()); // optimistic send
-                      }
-                    }
-                  }}
-                />
-
-                {/* Send or attach */}
-                {showSendButton && !recording ? (
-                  <button
-                    className="p-3 rounded-full bg-blue-600 hover:bg-blue-700 flex items-center justify-center transition-all duration-300 hover:scale-110"
-                    onClick={() => {
-                      if (text.trim()) sendMessage(text.trim());
-                    }}
-                    disabled={sending}
-                  >
-                    <span className="material-symbols-outlined text-xl leading-none">
-                      send
-                    </span>
-                  </button>
-                ) : !recording ? (
-                  <label
-                    className="p-3 rounded-full hover:bg-gray-700 relative cursor-pointer flex items-center justify-center transition-all duration-200 hover:scale-110"
-                    data-ignore-keep-kb
-                    title="Attach photos"
-                  >
-                    <span className="material-symbols-outlined text-xl leading-none">
-                      attach_file
-                    </span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      multiple
-                      className="absolute inset-0 opacity-0 cursor-pointer"
-                      onChange={handleSelectPhotos}
+              {/* Message body */}
+              {m.type === "text" && <p className="break-words">{m.text}</p>}
+              {m.type === "image" && (
+                <div className="mt-1">
+                  <div className="relative group overflow-hidden rounded-lg bg-black/20 w-[240px] h-[180px] sm:w-[260px] sm:h-[195px]">
+                    <img
+                      src={m.imageUrl}
+                      alt=""
+                      loading="lazy"
+                      className="absolute inset-0 h-full w-full object-cover cursor-pointer"
+                      onClick={() => setLightbox({ open: true, url: m.imageUrl })}
+                      referrerPolicy="no-referrer"
                     />
-                  </label>
-                ) : (
-                  <button
-                    onClick={finalizeRecording}
-                    className="p-3 rounded-full bg-green-600 hover:bg-green-700 flex items-center justify-center transition-all duration-300 hover:scale-110"
-                    title="Send recording"
-                  >
-                    <span className="material-symbols-outlined text-xl leading-none">
-                      send
-                    </span>
-                  </button>
+                    <a
+                      href={m.imageUrl}
+                      download
+                      className="absolute top-2 right-2 opacity-0 group-hover:opacity-100
+                                 transition-opacity bg-black/60 text-white px-2 py-1 rounded text-xs"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      Download
+                    </a>
+                  </div>
+                </div>
+              )}
+              {m.type === "audio" && (
+                <div className="mt-1">
+                  <AudioBubble src={m.audioUrl} mine={mine} />
+                </div>
+              )}
+
+              {/* Footer: ticks + timestamp */}
+              <div className={`flex items-center justify-end gap-1 mt-1 ${mine ? "text-blue-200" : "text-gray-400"}`}>
+                <p className="text-[10px]">
+                  {m.pending
+                    ? "sending…"
+                    : m.failed
+                    ? "failed"
+                    : formatTime(m.createdAt)}
+                </p>
+                {mine && !isGroup && (
+                  <>
+                    {m.pending && (
+                      <span className="material-symbols-outlined text-[14px] animate-spin">autorenew</span>
+                    )}
+                    {!m.pending && !m.failed && (
+                      <span
+                        className={`material-symbols-outlined text-[16px] leading-none 
+                          ${isReadByPeer ? "text-white" : ""}`}
+                        title={isReadByPeer ? "Read" : "Delivered"}
+                      >
+                        {isReadByPeer ? "done_all" : "done"}
+                      </span>
+                    )}
+                    {m.failed && (
+                      <span className="material-symbols-outlined text-red-500 text-[16px]">error</span>
+                    )}
+                  </>
                 )}
-              </footer>
+              </div>
+
+              {/* Context menu */}
+              {contextMenuMessageId === m.id && !selectMode && (
+                <div
+                  className={`absolute -top-10 ${mine ? "-left-35" : "-right-35"} 
+                              bg-[#1f2b38] border border-gray-700 rounded shadow-lg z-70 w-32`}
+                >
+                  <button onClick={() => { handleReplyTo(m); setContextMenuMessageId(null); }} className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm">
+                    Reply
+                  </button>
+                  <button onClick={() => { setForwardModalOpen(true); setSelectedIds([m.id]); setSelectMode(true); setContextMenuMessageId(null); }} className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm">
+                    Forward
+                  </button>
+                  <button onClick={() => { setSelectMode(true); setSelectedIds([m.id]); setContextMenuMessageId(null); }} className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm">
+                    Select
+                  </button>
+                  <button onClick={() => { setDeleteConfirm({ open: true, message: m }); setContextMenuMessageId(null); }} className="block w-full text-left px-3 py-1 text-red-400 hover:bg-gray-700 text-sm">
+                    Delete
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })
+    )}
+  </div>
+
+  {/* Scroll-to-bottom button */}
+  {showScrollToBottom && (
+    <button
+      onClick={() => {
+        if (listRef.current) {
+          listRef.current.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
+        }
+      }}
+      className="absolute right-6 bottom-10 z-30 bg-blue-400 hover:bg-blue-600 text-white rounded-full p-3 shadow-lg transition-all duration-300 flex items-center justify-center"
+      aria-label="Scroll to bottom"
+    >
+      <span className="material-symbols-outlined text-lg">arrow_downward</span>
+    </button>
+  )}
+
+</div>
+
+{/* Reply bar */}
+{replyTo && (
+  <div className="flex items-center justify-between bg-[#223749]/80 backdrop-blur-md text-white px-4 py-2 border-b border-gray-600 animate-slideDown">
+    <div className="truncate max-w-[80%]">
+      <p className="text-xs text-gray-300">Replying to</p>
+      <p className="text-sm truncate">
+        {replyTo.text ||
+          (replyTo.type === "image"
+            ? "📷 Photo"
+            : replyTo.type === "audio"
+            ? "🎤 Voice"
+            : "Message")}
+      </p>
+    </div>
+    <button onClick={() => setReplyTo(null)} className="text-gray-400 hover:text-white text-lg">✖</button>
+  </div>
+)}
+
+{/* Composer */}
+<footer
+  className="flex items-center gap-2 p-2 border-t border-gray-700 bg-[#1f2b38] relative"
+  style={{ paddingBottom: "max(env(safe-area-inset-bottom), 8px)" }}
+  onPointerDownCapture={keepKbFocus}
+>
+  {/* Mic / Cancel recording */}
+  <button
+    className="p-3 rounded-full hover:bg-gray-700 flex items-center justify-center transition-all duration-200 hover:scale-110"
+    onClick={recording ? cancelRecording : toggleRecord}
+  >
+    <span className="material-symbols-outlined text-xl leading-none">{recording ? "close" : "mic"}</span>
+  </button>
+
+  {/* Text input */}
+  <input
+    ref={inputRef}
+    className="flex-1 bg-[#18222d] rounded-full px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+    placeholder="Type a message..."
+    type="text"
+    value={text}
+    onChange={(e) => {
+      setText(e.target.value);
+      setShowSendButton(!!e.target.value.trim());
+      if (!isTyping && activeRoomId) {
+        startTyping(activeRoomId, me.uid);
+        setIsTyping(true);
+      }
+      if (typingTimeout.current) clearTimeout(typingTimeout.current);
+      typingTimeout.current = setTimeout(() => {
+        if (activeRoomId) stopTyping(activeRoomId, me.uid);
+        setIsTyping(false);
+      }, 3000);
+    }}
+    onKeyDown={(e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        if (text.trim()) {
+          sendMessage(text.trim()); // optimistic send
+        }
+      }
+    }}
+  />
+
+  {/* Send or attach */}
+  {showSendButton && !recording ? (
+    <button
+      className="p-3 rounded-full bg-blue-600 hover:bg-blue-700 flex items-center justify-center transition-all duration-300 hover:scale-110"
+      onClick={() => { if (text.trim()) sendMessage(text.trim()); }}
+      disabled={sending}
+    >
+      <span className="material-symbols-outlined text-xl leading-none">send</span>
+    </button>
+  ) : !recording ? (
+    <label className="p-3 rounded-full hover:bg-gray-700 relative cursor-pointer flex items-center justify-center transition-all duration-200 hover:scale-110" data-ignore-keep-kb title="Attach photos">
+      <span className="material-symbols-outlined text-xl leading-none">attach_file</span>
+      <input type="file" accept="image/*" multiple className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleSelectPhotos}/>
+    </label>
+  ) : (
+    <button
+      onClick={finalizeRecording}
+      className="p-3 rounded-full bg-green-600 hover:bg-green-700 flex items-center justify-center transition-all duration-300 hover:scale-110"
+      title="Send recording"
+    >
+      <span className="material-symbols-outlined text-xl leading-none">send</span>
+    </button>
+  )}
+</footer>
             </>
           )}
         </main>
@@ -2798,15 +2721,18 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
                       }}
                     >
                       <div
-                        id={`bubble-${m.id}`}
-                        className={`relative max-w-[85%] sm:max-w-xs lg:max-w-md p-3 rounded-lg shadow-sm 
-    select-none transition-all duration-200 ease-in-out
-    ${
-      mine
-        ? "bg-blue-700 text-white rounded-br-none"
-        : "bg-[#1f2b38] text-[#e0e0e0] rounded-bl-none border border-white/5"
-    }
-    ${isSelected ? "ring-2 ring-blue-400 scale-[0.98]" : ""}`}
+            id={`bubble-${m.id}`}
+            className={`relative max-w-[85%] sm:max-w-xs lg:max-w-md p-3 rounded-lg shadow-sm 
+              select-none transition-all duration-300 ease-in-out
+              ${
+                mine
+                  ? "bg-blue-700 text-white rounded-br-none"
+                  : "bg-[#1f2b38] text-[#e0e0e0] rounded-bl-none border border-white/5"
+              }
+              ${isSelected ? "ring-2 ring-blue-400 scale-[0.98]" : ""}
+              ${exitingIds.includes(m.id)
+                ? "opacity-0 scale-95 translate-x-4"
+                : "opacity-100 scale-100"}`}
                         // ✅ Click toggles select if in selectMode
                         onClick={() => {
                           if (selectMode) {
@@ -2944,6 +2870,30 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
               </button>
             )}
           </div>
+
+          {/* Scroll-to-bottom button */}
+          {/* {showScrollToBottom && (
+              <button
+                onClick={() => {
+                  if (listRef.current) {
+                    listRef.current.scrollTo({
+                      top: listRef.current.scrollHeight,
+                      behavior: "smooth",
+                    });
+                  }
+                }}
+                className={`absolute right-6 bottom-10 z-30 bg-blue-400 hover:bg-blue-700 text-white rounded-full p-3 shadow-lg transition-all duration-200 flex items-center justify-center ${
+                  showScrollToBottom
+                    ? "opacity-100 translate-y-0"
+                    : "opacity-0 translate-y-4 pointer-events-none"
+                }`}
+                aria-label="Scroll to bottom"
+              >
+                <span className="material-symbols-outlined text-lg">
+                  arrow_downward
+                </span>
+              </button>
+            )} */}
 
           {/* Reply bar above composer (Telegram style) */}
           {replyTo && (
@@ -3186,121 +3136,116 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
       )}
 
       {forwardModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl bg-[#1f2b38] border border-gray-700 rounded-2xl shadow-xl p-4 max-h-[90vh] overflow-y-auto">
-            {/* Header */}
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-white">Forward Messages</h2>
-              <button
-                className="p-1 rounded hover:bg-gray-700 flex items-center justify-center text-gray-300 hover:text-white"
-                onClick={() => setForwardModalOpen(false)}
-              >
-                ✖
-              </button>
-            </div>
+  <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+    <div className="w-full max-w-2xl bg-[#1f2b38] border border-gray-700 rounded-2xl shadow-xl p-4 max-h-[90vh] overflow-y-auto">
+      
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-bold text-white">Forward Messages</h2>
+        <button
+          className="p-1 rounded hover:bg-gray-700 flex items-center justify-center text-gray-300 hover:text-white"
+          onClick={() => setForwardModalOpen(false)}
+        >
+          ✖
+        </button>
+      </div>
 
-            {/* Search input */}
-            <div className="mb-3">
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search chats by name or username…"
-                className="w-full bg-[#18222d] rounded-md px-3 py-2 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-white"
-              />
-            </div>
+      {/* Search input */}
+      <div className="mb-3">
+        <input
+          type="text"
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          placeholder="Search chats by name or username…"
+          className="w-full bg-[#18222d] rounded-md px-3 py-2 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-white"
+        />
+      </div>
 
-            {/* Chat list */}
-            <div className="bg-[#18222d] rounded-md border border-gray-700 max-h-80 overflow-y-auto divide-y divide-gray-700">
-              {rooms
-                .filter((r) => {
-                  const term = searchTerm.trim().toLowerCase();
-                  if (!term) return true;
-                  return (
-                    r.title?.toLowerCase().includes(term) ||
-                    getDMName(r)?.toLowerCase().includes(term)
+      {/* Chat list */}
+      <div className="bg-[#18222d] rounded-md border border-gray-700 max-h-80 overflow-y-auto divide-y divide-gray-700">
+        {rooms
+          .filter((r) => {
+            const term = searchTerm.trim().toLowerCase();
+            if (!term) return true;
+            return (
+              r.title?.toLowerCase().includes(term) ||
+              getDMName(r)?.toLowerCase().includes(term)
+            );
+          })
+          .map((r) => {
+            const isSelected = forwardTargets.includes(r.id);
+            const avatar =
+              r.type === "group"
+                ? r.avatarUrl || "/logo-swiftly.svg"
+                : normalizeGooglePhotoURL(
+                    peerProfiles[r.memberIds?.find((id) => id !== me.uid)]
+                      ?.photoURL || "",
+                    40
                   );
-                })
-                .map((r) => {
-                  const isSelected = forwardTargets.includes(r.id);
-                  const avatar =
-                    r.type === "group"
-                      ? r.avatarUrl || "/logo-swiftly.svg"
-                      : normalizeGooglePhotoURL(
-                          peerProfiles[r.memberIds?.find((id) => id !== me.uid)]
-                            ?.photoURL || "",
-                          40
-                        );
-                  const title =
-                    r.type === "group" ? r.title : getDMName(r) || "User";
-                  return (
-                    <div
-                      key={r.id}
-                      onClick={() => {
-                        setForwardTargets((prev) =>
-                          isSelected
-                            ? prev.filter((id) => id !== r.id)
-                            : [...prev, r.id]
-                        );
-                        setSearchTerm(""); // clear search after selection
-                      }}
-                      className={`flex items-center gap-3 p-2 cursor-pointer transition ${
-                        isSelected ? "bg-blue-600" : "hover:bg-gray-700"
-                      }`}
-                    >
-                      <img
-                        src={avatar}
-                        alt={title}
-                        className="h-10 w-10 rounded-full object-cover flex-shrink-0"
-                        onError={(e) =>
-                          (e.currentTarget.src = "/logo-swiftly.svg")
-                        }
-                      />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-white truncate">
-                          {title}
-                        </p>
-                        {r.type === "group" ? (
-                          <p className="text-xs text-gray-400">Group</p>
-                        ) : (
-                          <p className="text-xs text-gray-400">
-                            Direct Message
-                          </p>
-                        )}
-                      </div>
-                      {isSelected && (
-                        <span className="material-symbols-outlined text-white">
-                          check
-                        </span>
-                      )}
-                    </div>
+            const title =
+              r.type === "group"
+                ? r.title
+                : getDMName(r) || "User";
+            return (
+              <div
+                key={r.id}
+                onClick={() => {
+                  setForwardTargets((prev) =>
+                    isSelected
+                      ? prev.filter((id) => id !== r.id)
+                      : [...prev, r.id]
                   );
-                })}
-            </div>
-
-            {/* Actions */}
-            <div className="flex justify-end gap-2 mt-4">
-              <button
-                onClick={() => setForwardModalOpen(false)}
-                className="px-4 py-2 rounded-md bg-gray-700 text-gray-200 hover:bg-gray-600 transition"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleForwardMessages}
-                className={`px-4 py-2 rounded-md text-white transition ${
-                  forwardTargets.length > 0
-                    ? "bg-blue-600 hover:bg-blue-700"
-                    : "bg-gray-500 cursor-not-allowed"
+                  setSearchTerm(""); // clear search after selection
+                }}
+                className={`flex items-center gap-3 p-2 cursor-pointer transition ${
+                  isSelected ? "bg-blue-600" : "hover:bg-gray-700"
                 }`}
-                disabled={forwardTargets.length === 0}
               >
-                Send
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+                <img
+                  src={avatar}
+                  alt={title}
+                  className="h-10 w-10 rounded-full object-cover flex-shrink-0"
+                  onError={(e) => (e.currentTarget.src = "/logo-swiftly.svg")}
+                />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-white truncate">{title}</p>
+                  {r.type === "group" ? (
+                    <p className="text-xs text-gray-400">Group</p>
+                  ) : (
+                    <p className="text-xs text-gray-400">Direct Message</p>
+                  )}
+                </div>
+                {isSelected && (
+                  <span className="material-symbols-outlined text-white">check</span>
+                )}
+              </div>
+            );
+          })}
+      </div>
+
+      {/* Actions */}
+      <div className="flex justify-end gap-2 mt-4">
+        <button
+          onClick={() => setForwardModalOpen(false)}
+          className="px-4 py-2 rounded-md bg-gray-700 text-gray-200 hover:bg-gray-600 transition"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={handleForwardMessages}
+          className={`px-4 py-2 rounded-md text-white transition ${
+            forwardTargets.length > 0
+              ? "bg-blue-600 hover:bg-blue-700"
+              : "bg-gray-500 cursor-not-allowed"
+          }`}
+          disabled={forwardTargets.length === 0}
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  </div>
+)}
 
       {/* Add Members Modal (backdrop no-close) */}
       {showAddMembers && (

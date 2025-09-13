@@ -94,6 +94,12 @@ export function subscribePresence(uids, onUpdate) {
   return () => unsubs.forEach((u) => u());
 }
 
+export function goOfflineNow(uid) {
+  // Force offline immediately
+  return writeStatus(uid, "offline");
+}
+
+
 // USER starts typing in this room
 export function startTyping(roomId, uid) {
   const typingRef = ref(rtdb, `typing/${roomId}/${uid}`);
