@@ -218,7 +218,7 @@ export function AudioBubble({ src, mine = false }) {
 }
 
 // ----------------- main -----------------
-export default function ChatShell({ me, meProfile, onLogout, initialRoomId  }) {
+export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
   const isMobile = useIsMobile();
 
   const [view, setView] = useState("chats"); // 'chats' | 'settings' | 'profile'
@@ -259,13 +259,150 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId  }) {
   const [replyTo, setReplyTo] = useState(null);
   const [contextMenuMessageId, setContextMenuMessageId] = useState(null);
 
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [forwardModalOpen, setForwardModalOpen] = useState(false);
+  const [forwardTargets, setForwardTargets] = useState([]);
+  const [searchTerm, setSearchTerm] = useState("");
+
+  const [exitingIds, setExitingIds] = useState([]);
+
+  async function handleDeleteMessages(ids) {
+    if (!ids.length) return;
+
+    // 🚀 1. Optimistic exit animation
+    setExitingIds((prev) => [...prev, ...ids]);
+    setSelectMode(false);
+    setSelectedIds([]);
+
+    setTimeout(() => {
+      setMessages((prev) => prev.filter((m) => !ids.includes(m.id)));
+      setExitingIds((prev) => prev.filter((id) => !ids.includes(id)));
+    }, 300); // match `transition-all duration-300`
+
+    // ⚙️ 2. Background Firestore + storage cleanup
+    (async () => {
+      try {
+        for (const id of ids) {
+          const msg = messages.find((m) => m.id === id);
+          if (!msg) continue;
+
+          // Delete from Supabase storage if media
+          const mediaUrl =
+            msg.type === "image"
+              ? msg.imageUrl
+              : msg.type === "audio"
+              ? msg.audioUrl
+              : null;
+
+          if (mediaUrl) {
+            try {
+              await deleteMediaFiles([mediaUrl]);
+              console.log("Deleted media file:", mediaUrl);
+            } catch (err) {
+              console.error("Failed to delete media from Supabase:", err);
+            }
+          }
+
+          // Delete Firestore doc
+          try {
+            await deleteDoc(doc(db, "rooms", activeRoomId, "messages", id));
+          } catch (err) {
+            console.error("Firestore delete failed for", id, err);
+          }
+        }
+
+        // ✅ Update room’s lastMessage
+        const q = query(
+          collection(db, "rooms", activeRoomId, "messages"),
+          orderBy("createdAt", "desc"),
+          limit(1)
+        );
+        const snap = await getDocs(q);
+
+        if (!snap.empty) {
+          const lastMsg = snap.docs[0].data();
+          await updateDoc(doc(db, "rooms", activeRoomId), {
+            lastMessageAt: lastMsg.createdAt || serverTimestamp(),
+            lastMessagePreview:
+              lastMsg.type === "text"
+                ? lastMsg.text.slice(0, 80)
+                : lastMsg.type === "image"
+                ? "📷 Photo"
+                : lastMsg.type === "audio"
+                ? "🎤 Voice"
+                : "Message",
+          });
+        } else {
+          // No messages left
+          await updateDoc(doc(db, "rooms", activeRoomId), {
+            lastMessageAt: serverTimestamp(),
+            lastMessagePreview: "",
+          });
+        }
+      } catch (err) {
+        console.error("Error during bulk delete cleanup:", err);
+      }
+    })();
+  }
+
+  async function handleForwardMessages() {
+    const msgsToForward = messages.filter((m) => selectedIds.includes(m.id));
+
+    // Optimistic: add bubbles to each target room immediately
+    forwardTargets.forEach((targetId) => {
+      msgsToForward.forEach((msg) => {
+        const tempId = "fwd-" + Date.now() + "-" + Math.random();
+
+        const pendingForward = {
+          id: tempId,
+          senderId: me.uid,
+          type: msg.type,
+          text: msg.text || "",
+          imageUrl: msg.imageUrl || "",
+          audioUrl: msg.audioUrl || "",
+          createdAt: new Date(),
+          forward: true,
+          forwardFrom: msg.senderId,
+          pending: true,
+        };
+
+        // If you're inside target room, append immediately. Otherwise just Firestore handles it.
+        if (activeRoomId === targetId) {
+          setMessages((prev) => [...prev, pendingForward]);
+        }
+
+        // Background Firestore write
+        const roomRef = doc(db, "rooms", targetId);
+        addDoc(collection(roomRef, "messages"), {
+          senderId: me.uid,
+          type: msg.type,
+          text: msg.text || null,
+          imageUrl: msg.imageUrl || null,
+          audioUrl: msg.audioUrl || null,
+          forward: true,
+          forwardFrom: msg.senderId,
+          createdAt: serverTimestamp(),
+          readBy: [me.uid],
+        }).catch((e) => {
+          console.error("Forward failed", e);
+        });
+      });
+    });
+
+    // Cleanup selection
+    setSelectMode(false);
+    setForwardModalOpen(false);
+    setSelectedIds([]);
+    setForwardTargets([]);
+  }
 
   useEffect(() => {
-  if (initialRoomId) {
-    console.log("Opening room from notification:", initialRoomId);
-    setActiveRoomId(initialRoomId);
-  }
-}, [initialRoomId]);
+    if (initialRoomId) {
+      console.log("Opening room from notification:", initialRoomId);
+      setActiveRoomId(initialRoomId);
+    }
+  }, [initialRoomId]);
 
   // common reply handler
   function handleReplyTo(message) {
@@ -371,7 +508,7 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId  }) {
     setRecording(false);
   }
   // At the top of ChatShell component (after your other states/refs)
-  const holdDuration = 1500; // 1.5 seconds
+  const holdDuration = 1200; // 1.5 seconds
   const [deleteConfirm, setDeleteConfirm] = useState({
     open: false,
     message: null,
@@ -692,6 +829,13 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId  }) {
     return normalizeGooglePhotoURL(p?.photoURL || "", 56);
   }
 
+  function getDMName(room) {
+    if (!room || room.type !== "dm") return "Unknown";
+    const peerId = room.memberIds?.find((id) => id !== me.uid);
+    const peerProfile = peerProfiles?.[peerId];
+    return peerProfile?.displayName || peerProfile?.username || "User";
+  }
+
   const [groupSearchTerm, setGroupSearchTerm] = useState("");
   useEffect(() => {
     const searchUsers = async () => {
@@ -809,7 +953,6 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId  }) {
     return unsub;
   }, [activeRoomId, view]);
 
-
   // scroll watcher
   useEffect(() => {
     const handleScroll = () => {
@@ -917,89 +1060,113 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId  }) {
     }
   }
 
+  //send messsage function with all fcm backend push ,reply handling,unread counters bla bla
   async function sendMessage() {
-  const t = text.trim();
-  if (!t || !activeRoomId) return;
-  setSending(true);
+    const t = text.trim();
+    if (!t || !activeRoomId) return;
 
-  try {
-    const roomRef = doc(db, "rooms", activeRoomId);
+    const tempId = "temp-" + Date.now();
 
-    // Save the message
-    await addDoc(collection(roomRef, "messages"), {
+    // ---- 1. Optimistic pending bubble ----
+    const pendingMsg = {
+      id: tempId,
       senderId: me.uid,
       type: "text",
       text: t.slice(0, 4000),
       replyTo: replyTo?.id || null,
-      createdAt: serverTimestamp(),
+      createdAt: new Date(),
       readBy: [me.uid],
-    });
-
-    // Grab the room
-    const snap = await getDoc(roomRef);
-    const data = snap.data();
-
-    // Prepare updates for unread counters
-    const updates = {
-      lastMessageAt: serverTimestamp(),
-      lastMessagePreview: t.slice(0, 80),
+      pending: true,
     };
 
-    (data.memberIds || []).forEach((uid) => {
-      if (uid === me.uid) {
-        updates[`unread.${uid}`] = 0;
-      } else {
-        updates[`unread.${uid}`] = increment(1);
-      }
-    });
+    setMessages((prev) => [...prev, pendingMsg]);
 
-    await updateDoc(roomRef, updates);
-
-    // 👉 NEW: Gather FCM tokens of recipients
-    const recipientTokens = [];
-    for (const uid of data.memberIds || []) {
-      if (uid !== me.uid) {
-        const userSnap = await getDoc(doc(db, "profiles", uid));
-        if (userSnap.exists() && userSnap.data().fcmToken) {
-          recipientTokens.push(userSnap.data().fcmToken);
-        }
-      }
-    }
-
-    // 👉 NEW: Call backend to send push
-    if (recipientTokens.length > 0) {
-      await fetch("https://testing4234.pythonanywhere.com/send", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    tokens: recipientTokens,
-    senderName: me.displayName || "Someone",
-    senderPhoto: me.photoURL,
-    roomId: activeRoomId,
-    roomTitle: data.title || "Group",
-    roomType: data.type, // "dm" or "group"
-    msgType: "text",     // "text" / "image" / "audio"
-    body: t              // the actual message text
-  }),
-});
-    }
-
-    // Reset UI
+    // Clear UI instantly
     setText("");
     setShowSendButton(false);
     setReplyTo(null);
 
-    if (listRef.current) {
-      setTimeout(() => {
-        listRef.current.scrollTop = listRef.current.scrollHeight;
-      }, 0);
+    try {
+      const roomRef = doc(db, "rooms", activeRoomId);
+
+      // ---- 2. Write message ----
+      await addDoc(collection(roomRef, "messages"), {
+        senderId: me.uid,
+        type: "text",
+        text: t.slice(0, 4000),
+        replyTo: replyTo?.id || null,
+        createdAt: serverTimestamp(),
+        readBy: [me.uid],
+      });
+
+      // ---- 3. Update room metadata ----
+      const snap = await getDoc(roomRef);
+      const data = snap.data();
+
+      const updates = {
+        lastMessageAt: serverTimestamp(),
+        lastMessagePreview: t.slice(0, 80),
+      };
+
+      (data.memberIds || []).forEach((uid) => {
+        if (uid === me.uid) {
+          updates[`unread.${uid}`] = 0;
+        } else {
+          updates[`unread.${uid}`] = increment(1);
+        }
+      });
+
+      await updateDoc(roomRef, updates);
+
+      // ---- 4. Gather FCM tokens ----
+      const recipientTokens = [];
+      for (const uid of data.memberIds || []) {
+        if (uid !== me.uid) {
+          const userSnap = await getDoc(doc(db, "profiles", uid));
+          if (userSnap.exists() && userSnap.data().fcmToken) {
+            recipientTokens.push(userSnap.data().fcmToken);
+          }
+        }
+      }
+
+      // ---- 5. Call backend for push ----
+      if (recipientTokens.length > 0) {
+        await fetch("https://testing4234.pythonanywhere.com/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tokens: recipientTokens,
+            senderName: me.displayName || "Someone",
+            senderPhoto: me.photoURL,
+            roomId: activeRoomId,
+            roomTitle: data.title || "Group",
+            roomType: data.type, // "dm" or "group"
+            msgType: "text", // "text" / "image" / "audio"
+            body: t, // actual message text
+          }),
+        });
+      }
+
+      // ---- 6. Success: Firestore snapshot will replace pending with real doc ----
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+
+      // ---- 7. Keep scroll pinned ----
+      if (listRef.current) {
+        setTimeout(() => {
+          listRef.current.scrollTop = listRef.current.scrollHeight;
+        }, 0);
+      }
+    } catch (err) {
+      console.error("sendMessage failed:", err);
+
+      // Mark as failed (red error icon)
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === tempId ? { ...m, pending: false, failed: true } : m
+        )
+      );
     }
-  } catch (err) {
-    console.error("sendMessage failed:", err);
-  } finally {
-    setSending(false);
   }
-}
 
   async function resetUnread(roomId, uid) {
     if (!roomId || !uid) return;
@@ -1011,8 +1178,6 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId  }) {
       console.error("resetUnread failed", e);
     }
   }
-
-  
 
   const isActiveViewer =
     activeRoom &&
@@ -1377,41 +1542,103 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId  }) {
     return () => window.removeEventListener("popstate", handlePop);
   }, [view, activeRoomId, showProfile]);
 
+  useEffect(() => {
+    if (!activeRoomId || view !== "chats") return;
 
-useEffect(() => {
-  if (!activeRoomId || view !== "chats") return;
+    const tryMarkAsRead = () => {
+      if (document.visibilityState === "visible" && document.hasFocus()) {
+        // Reset unread bubble
+        if ((activeRoom?.unread?.[me.uid] || 0) > 0) {
+          resetUnread(activeRoomId, me.uid);
+        }
 
-  const tryMarkAsRead = () => {
-    if (document.visibilityState === "visible" && document.hasFocus()) {
-      // Reset unread bubble
-      if ((activeRoom?.unread?.[me.uid] || 0) > 0) {
-        resetUnread(activeRoomId, me.uid);
+        // Mark per-message receipts
+        const unread = messages.filter(
+          (m) => m.senderId !== me.uid && !(m.readBy || []).includes(me.uid)
+        );
+
+        unread.forEach(async (m) => {
+          try {
+            await updateDoc(doc(db, "rooms", activeRoomId, "messages", m.id), {
+              readBy: arrayUnion(me.uid),
+            });
+          } catch {}
+        });
       }
+    };
 
-      // Mark per-message receipts
-      const unread = messages.filter(
-        (m) => m.senderId !== me.uid && !(m.readBy || []).includes(me.uid)
-      );
+    tryMarkAsRead(); // run immediately if conditions are valid
+    window.addEventListener("focus", tryMarkAsRead);
+    document.addEventListener("visibilitychange", tryMarkAsRead);
 
-      unread.forEach(async (m) => {
-        try {
-          await updateDoc(doc(db, "rooms", activeRoomId, "messages", m.id), {
-            readBy: arrayUnion(me.uid),
-          });
-        } catch {}
+    return () => {
+      window.removeEventListener("focus", tryMarkAsRead);
+      document.removeEventListener("visibilitychange", tryMarkAsRead);
+    };
+  }, [messages, activeRoomId, view, me.uid, activeRoom?.unread]);
+
+  async function handleForwardMessages() {
+    if (forwardTargets.length === 0) return;
+
+    // Get selected messages
+    const msgsToForward = messages.filter((m) => selectedIds.includes(m.id));
+
+    // Close popup instantly
+    setForwardModalOpen(false);
+    setSelectMode(false);
+    setSelectedIds([]);
+    const targets = [...forwardTargets];
+    setForwardTargets([]);
+
+    // For each target room, insert forwarded copies
+    targets.forEach((targetId) => {
+      msgsToForward.forEach((msg) => {
+        const tempId = "fwd-" + Date.now() + "-" + Math.random();
+
+        // Optimistic add locally if this target is currently open
+        if (activeRoomId === targetId) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              ...msg,
+              id: tempId,
+              pending: true,
+              forward: true,
+              createdAt: new Date(),
+              readBy: [me.uid],
+            },
+          ]);
+        }
+
+        // Background Firestore write
+        const roomRef = doc(db, "rooms", targetId);
+        addDoc(collection(roomRef, "messages"), {
+          senderId: me.uid,
+          type: msg.type,
+          text: msg.text || "",
+          imageUrl: msg.imageUrl || null,
+          audioUrl: msg.audioUrl || null,
+          forward: true,
+          forwardFrom: msg.senderId,
+          createdAt: serverTimestamp(),
+          readBy: [me.uid],
+        }).catch((e) => console.error("Forward failed:", e));
+
+        // Update room preview
+        updateDoc(roomRef, {
+          lastMessageAt: serverTimestamp(),
+          lastMessagePreview:
+            msg.type === "text"
+              ? msg.text.slice(0, 80)
+              : msg.type === "image"
+              ? "📷 Photo"
+              : msg.type === "audio"
+              ? "🎤 Voice"
+              : "Message",
+        });
       });
-    }
-  };
-
-  tryMarkAsRead(); // run immediately if conditions are valid
-  window.addEventListener("focus", tryMarkAsRead);
-  document.addEventListener("visibilitychange", tryMarkAsRead);
-
-  return () => {
-    window.removeEventListener("focus", tryMarkAsRead);
-    document.removeEventListener("visibilitychange", tryMarkAsRead);
-  };
-}, [messages, activeRoomId, view, me.uid, activeRoom?.unread]);
+    });
+  }
 
   // ----------------- UI -----------------
   return (
@@ -1840,9 +2067,46 @@ useEffect(() => {
 
               {/* Messages container with relative positioning for the scroll button */}
               <div className="flex-1 min-h-0 overflow-hidden relative">
+                {/* Selection Mode Action Bar */}
+                {selectMode && (
+                  <div
+                    className="absolute top-0 left-0 right-0 z-50 bg-[#182533]/95 backdrop-blur-md
+                    border-b border-gray-700 flex items-center justify-between px-4 py-2 shadow-md"
+                  >
+                    <span className="text-white font-medium">
+                      {selectedIds.length} selected
+                    </span>
+                    <div className="flex gap-6">
+                      <button
+                        className="text-gray-300 hover:text-white transition"
+                        onClick={() => {
+                          setSelectMode(false);
+                          setSelectedIds([]);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="text-red-400 hover:text-red-500 font-medium transition"
+                        onClick={() => handleDeleteMessages(selectedIds)}
+                      >
+                        Delete
+                      </button>
+                      <button
+                        className="text-blue-400 hover:text-blue-500 font-medium transition"
+                        onClick={() => setForwardModalOpen(true)}
+                      >
+                        Forward
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Messages List */}
                 <div
                   ref={listRef}
-                  className="h-full overflow-y-auto scrollbar-telegram p-4 lg:p-6 space-y-4 lg:space-y-6"
+                  className={`h-full overflow-y-auto scrollbar-telegram p-4 lg:p-6 space-y-4 lg:space-y-6 
+                ${selectMode ? "pt-12" : ""}`}
                 >
                   {messages.length === 0 ? (
                     <div className="text-center text-gray-400 text-sm pt-8">
@@ -1863,33 +2127,55 @@ useEffect(() => {
                         !isGroup &&
                         !!peerId &&
                         (m.readBy || []).includes(peerId);
+                      const isSelected =
+                        selectMode && selectedIds.includes(m.id);
 
                       return (
                         <div
                           key={m.id}
                           className={`flex ${
                             mine ? "justify-end" : "justify-start"
-                          }`}
+                          } 
+                        transition-transform duration-300 ease-in-out`}
                           onContextMenu={(e) => {
                             e.preventDefault();
-                            setContextMenuMessageId(m.id); // 👈 this state tracks which bubble has an open menu
+                            setContextMenuMessageId(m.id);
                           }}
                         >
                           <div
-                            className={`relative max-w-[85%] sm:max-w-xs lg:max-w-md p-3 rounded-lg shadow-sm ${
-                              mine
-                                ? "bg-blue-700 text-white rounded-br-none"
-                                : "bg-[#1f2b38] text-[#e0e0e0] rounded-bl-none border border-white/5"
-                            }`}
+                            id={`bubble-${m.id}`}
+                            className={`relative max-w-[85%] sm:max-w-xs lg:max-w-md p-3 rounded-lg shadow-sm
+                select-none transition-all duration-300 ease-in-out
+                ${
+                  mine
+                    ? "bg-blue-700 text-white rounded-br-none"
+                    : "bg-[#1f2b38] text-[#e0e0e0] rounded-bl-none border border-white/5"
+                }
+                ${isSelected ? "ring-2 ring-blue-400 scale-[0.98]" : ""}
+                ${
+                  exitingIds.includes(m.id)
+                    ? "opacity-0 scale-95 translate-x-4"
+                    : "opacity-100 scale-100"
+                }
+              `}
+                            onClick={() => {
+                              if (selectMode) {
+                                setSelectedIds((prev) =>
+                                  prev.includes(m.id)
+                                    ? prev.filter((id) => id !== m.id)
+                                    : [...prev, m.id]
+                                );
+                              }
+                            }}
                           >
-                            {/* Show sender name in groups */}
+                            {/* Group Sender */}
                             {isGroup && !mine && (
                               <div className="text-xs font-medium text-gray-400 mb-1">
                                 {senderName}
                               </div>
                             )}
 
-                            {/* Reply snippet */}
+                            {/* Reply Snippet */}
                             {m.replyTo && (
                               <div className="text-xs text-gray-400 border-l-2 border-blue-500 pl-2 mb-1">
                                 {messages.find((msg) => msg.id === m.replyTo)
@@ -1905,11 +2191,10 @@ useEffect(() => {
                               </div>
                             )}
 
-                            {/* Message Types */}
+                            {/* Message body */}
                             {m.type === "text" && (
                               <p className="break-words">{m.text}</p>
                             )}
-
                             {m.type === "image" && (
                               <div className="mt-1">
                                 <div className="relative group overflow-hidden rounded-lg bg-black/20 w-[240px] h-[180px] sm:w-[260px] sm:h-[195px]">
@@ -1929,7 +2214,8 @@ useEffect(() => {
                                   <a
                                     href={m.imageUrl}
                                     download
-                                    className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 text-white px-2 py-1 rounded text-xs"
+                                    className="absolute top-2 right-2 opacity-0 group-hover:opacity-100
+                                 transition-opacity bg-black/60 text-white px-2 py-1 rounded text-xs"
                                     onClick={(e) => e.stopPropagation()}
                                   >
                                     Download
@@ -1937,133 +2223,96 @@ useEffect(() => {
                                 </div>
                               </div>
                             )}
-
                             {m.type === "audio" && (
                               <div className="mt-1">
                                 <AudioBubble src={m.audioUrl} mine={mine} />
                               </div>
                             )}
 
-                            {/* Timestamp + read receipt */}
+                            {/* Footer: ticks + timestamp */}
                             <div
                               className={`flex items-center justify-end gap-1 mt-1 ${
                                 mine ? "text-blue-200" : "text-gray-400"
                               }`}
                             >
                               <p className="text-[10px]">
-                                {formatTime(m.createdAt)}
+                                {m.pending
+                                  ? "sending…"
+                                  : m.failed
+                                  ? "failed"
+                                  : formatTime(m.createdAt)}
                               </p>
                               {mine && !isGroup && (
-                                <span
-                                  className={`material-symbols-outlined text-[16px] leading-none ${
-                                    isReadByPeer
-                                      ? mine
-                                        ? "text-white"
-                                        : "text-blue-400"
-                                      : ""
-                                  }`}
-                                  title={isReadByPeer ? "Read" : "Delivered"}
-                                >
-                                  {isReadByPeer ? "done_all" : "done"}
-                                </span>
+                                <>
+                                  {m.pending && (
+                                    <span className="material-symbols-outlined text-[14px] animate-spin">
+                                      autorenew
+                                    </span>
+                                  )}
+                                  {!m.pending && !m.failed && (
+                                    <span
+                                      className={`material-symbols-outlined text-[16px] leading-none 
+                          ${isReadByPeer ? "text-white" : ""}`}
+                                      title={
+                                        isReadByPeer ? "Read" : "Delivered"
+                                      }
+                                    >
+                                      {isReadByPeer ? "done_all" : "done"}
+                                    </span>
+                                  )}
+                                  {m.failed && (
+                                    <span className="material-symbols-outlined text-red-500 text-[16px]">
+                                      error
+                                    </span>
+                                  )}
+                                </>
                               )}
                             </div>
 
-                            {/* Inline Popup Menu (sticky to this bubble) */}
-                            {contextMenuMessageId === m.id && (
+                            {/* Context menu */}
+                            {contextMenuMessageId === m.id && !selectMode && (
                               <div
-                                className={`absolute -top-0 ${
-                                  mine ? "-left-22" : "-right-22"
-                                } bg-[#1f2b38] border border-gray-700 rounded shadow-lg z-50`}
+                                className={`absolute top-0 ${
+                                  mine ? "-left-28" : "-right-28"
+                                } 
+                              bg-[#1f2b38] border border-gray-700 rounded shadow-lg z-50 w-32`}
                               >
                                 <button
-                                  onClick={() => handleReplyTo(m)}
+                                  onClick={() => {
+                                    handleReplyTo(m);
+                                    setContextMenuMessageId(null);
+                                  }}
                                   className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm"
                                 >
                                   Reply
                                 </button>
                                 <button
-                                  onClick={async () => {
-                                    const msgRef = doc(
-                                      db,
-                                      "rooms",
-                                      activeRoomId,
-                                      "messages",
-                                      m.id
-                                    );
-                                    const msgSnap = await getDoc(msgRef);
-
-                                    if (msgSnap.exists()) {
-                                      const msg = msgSnap.data();
-
-                                      // 1️⃣ If the message has media, delete from Supabase storage
-                                      const mediaUrl =
-                                        msg.type === "image"
-                                          ? msg.imageUrl
-                                          : msg.type === "audio"
-                                          ? msg.audioUrl
-                                          : null;
-                                      if (mediaUrl) {
-                                        try {
-                                          console.log(
-                                            "Deleting media from Supabase:",
-                                            mediaUrl
-                                          );
-                                          await deleteMediaFiles([mediaUrl]);
-                                        } catch (err) {
-                                          console.error(
-                                            "Failed to delete media file:",
-                                            err
-                                          );
-                                        }
-                                      }
-
-                                      // 2️⃣ Delete the Firestore message doc
-                                      await deleteDoc(msgRef);
-
-                                      // 3️⃣ Update the room's lastMessagePreview
-                                      const q = query(
-                                        collection(
-                                          db,
-                                          "rooms",
-                                          activeRoomId,
-                                          "messages"
-                                        ),
-                                        orderBy("createdAt", "desc"),
-                                        limit(1)
-                                      );
-                                      const snap = await getDocs(q);
-
-                                      if (!snap.empty) {
-                                        const lastMsg = snap.docs[0].data();
-                                        await updateDoc(
-                                          doc(db, "rooms", activeRoomId),
-                                          {
-                                            lastMessageAt:
-                                              lastMsg.createdAt ||
-                                              serverTimestamp(),
-                                            lastMessagePreview:
-                                              lastMsg.type === "text"
-                                                ? lastMsg.text.slice(0, 80)
-                                                : lastMsg.type === "image"
-                                                ? "📷 Photo"
-                                                : lastMsg.type === "audio"
-                                                ? "🎤 Voice"
-                                                : "Message",
-                                          }
-                                        );
-                                      } else {
-                                        // If no messages left in this room
-                                        await updateDoc(
-                                          doc(db, "rooms", activeRoomId),
-                                          {
-                                            lastMessageAt: serverTimestamp(),
-                                            lastMessagePreview: "",
-                                          }
-                                        );
-                                      }
-                                    }
-
+                                  onClick={() => {
+                                    setForwardModalOpen(true);
+                                    setSelectedIds([m.id]);
+                                    setSelectMode(true);
+                                    setContextMenuMessageId(null);
+                                  }}
+                                  className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm"
+                                >
+                                  Forward
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setSelectMode(true);
+                                    setSelectedIds([m.id]);
+                                    setContextMenuMessageId(null);
+                                  }}
+                                  className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm"
+                                >
+                                  Select
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setDeleteConfirm({
+                                      open: true,
+                                      message: m,
+                                    });
                                     setContextMenuMessageId(null);
                                   }}
                                   className="block w-full text-left px-3 py-1 text-red-400 hover:bg-gray-700 text-sm"
@@ -2090,11 +2339,7 @@ useEffect(() => {
                         });
                       }
                     }}
-                    className={`absolute right-6 bottom-10 z-30 bg-blue-400 hover:bg-blue-700 text-white rounded-full p-3 shadow-lg transition-all duration-200 flex items-center justify-center ${
-                      showScrollToBottom
-                        ? "opacity-100 translate-y-0"
-                        : "opacity-0 translate-y-4 pointer-events-none"
-                    }`}
+                    className="absolute right-6 bottom-10 z-30 bg-blue-400 hover:bg-blue-600 text-white rounded-full p-3 shadow-lg transition-all duration-300 flex items-center justify-center"
                     aria-label="Scroll to bottom"
                   >
                     <span className="material-symbols-outlined text-lg">
@@ -2104,7 +2349,7 @@ useEffect(() => {
                 )}
               </div>
 
-              {/* Reply bar above composer (Telegram style) */}
+              {/* Reply bar */}
               {replyTo && (
                 <div className="flex items-center justify-between bg-[#223749]/80 backdrop-blur-md text-white px-4 py-2 border-b border-gray-600 animate-slideDown">
                   <div className="truncate max-w-[80%]">
@@ -2127,6 +2372,7 @@ useEffect(() => {
                 </div>
               )}
 
+              {/* Composer */}
               <footer
                 className="flex items-center gap-2 p-2 border-t border-gray-700 bg-[#1f2b38] relative"
                 style={{
@@ -2134,7 +2380,7 @@ useEffect(() => {
                 }}
                 onPointerDownCapture={keepKbFocus}
               >
-                {/* Always show mic button, changes function when recording */}
+                {/* Mic / Cancel recording */}
                 <button
                   className="p-3 rounded-full hover:bg-gray-700 flex items-center justify-center transition-all duration-200 hover:scale-110"
                   onClick={recording ? cancelRecording : toggleRecord}
@@ -2154,12 +2400,10 @@ useEffect(() => {
                   onChange={(e) => {
                     setText(e.target.value);
                     setShowSendButton(!!e.target.value.trim());
-
                     if (!isTyping && activeRoomId) {
                       startTyping(activeRoomId, me.uid);
                       setIsTyping(true);
                     }
-
                     if (typingTimeout.current)
                       clearTimeout(typingTimeout.current);
                     typingTimeout.current = setTimeout(() => {
@@ -2170,26 +2414,19 @@ useEffect(() => {
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
-                      const toSend = text.trim();
-                      setText(""); // clear immediately
-                      sendMessage(toSend);
-
-                      if (activeRoomId) stopTyping(activeRoomId, me.uid);
-                      setIsTyping(false);
-                      if (typingTimeout.current)
-                        clearTimeout(typingTimeout.current);
+                      if (text.trim()) {
+                        sendMessage(text.trim()); // optimistic send
+                      }
                     }
                   }}
                 />
 
-                {/* Conditional rendering for send/attach buttons */}
+                {/* Send or attach */}
                 {showSendButton && !recording ? (
                   <button
                     className="p-3 rounded-full bg-blue-600 hover:bg-blue-700 flex items-center justify-center transition-all duration-300 hover:scale-110"
                     onClick={() => {
-                      const toSend = text.trim();
-                      setText("");
-                      sendMessage(toSend);
+                      if (text.trim()) sendMessage(text.trim());
                     }}
                     disabled={sending}
                   >
@@ -2224,61 +2461,6 @@ useEffect(() => {
                       send
                     </span>
                   </button>
-                )}
-
-                {/* Floating vertical recording panel with enhanced features */}
-                {recording && (
-                  <div className="absolute bottom-20 right-4 flex flex-col items-center gap-4 px-2 py-3 rounded-2xl bg-[#223749]/90 backdrop-blur-md shadow-2xl border border-blue-500 animate-fadeIn z-50">
-                    {/* Visual indicator and timer */}
-                    <div className="flex flex-col items-center gap-2">
-                      {/* Recording status indicator */}
-                      <div className="flex items-center gap-2">
-                        <div className="relative">
-                          <div className="w-4 h-4 bg-red-500 rounded-full animate-pulse"></div>
-                          {isPaused && (
-                            <div className="absolute inset-0 flex items-center justify-center">
-                              <div className="w-3 h-3 bg-yellow-400 rounded-sm"></div>
-                            </div>
-                          )}
-                        </div>
-                        <p className="text-xs text-gray-400">
-                          {isPaused ? "Paused" : "Recording..."}
-                        </p>
-                      </div>
-
-                      {/* Waveform + timer */}
-                      <div className="flex flex-col items-center gap-2">
-                        <div className="flex items-end gap-1 h-6">
-                          {Array.from({ length: 5 }).map((_, i) => (
-                            <span
-                              key={i}
-                              className="w-1 bg-blue-400 animate-pulse"
-                              style={{
-                                height: `${8 + Math.random() * 16}px`,
-                                animationDelay: `${i * 0.15}s`,
-                              }}
-                            />
-                          ))}
-                        </div>
-                        <p className="text-sm font-mono text-gray-200">
-                          {recordTimer}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Control buttons */}
-                    <div className="flex flex-col gap-3">
-                      {/* Pause/Resume */}
-                      <button
-                        onClick={togglePauseRecord}
-                        className="w-12 h-12 rounded-full flex items-center justify-center bg-yellow-600 hover:bg-yellow-500 shadow-lg transition transform hover:scale-110"
-                      >
-                        <span className="material-symbols-outlined text-white text-2xl">
-                          {isPaused ? "play_arrow" : "pause"}
-                        </span>
-                      </button>
-                    </div>
-                  </div>
                 )}
               </footer>
             </>
@@ -2479,8 +2661,46 @@ useEffect(() => {
             </div>
           </header>
 
-          {/* Messages (only this scrolls) */}
+          {/* Messages (scrollable area) */}
           <div className="flex-1 min-h-0 overflow-hidden relative">
+            {/* ✅ Modern Telegram-style Selection Action Bar */}
+            {selectMode && (
+              <div
+                className="absolute top-0 left-0 right-0 z-50 
+                  bg-[#182533]/95 backdrop-blur-md border-b border-gray-700 
+                  flex items-center justify-between px-4 py-2 shadow-md 
+                  animate-slideDown"
+              >
+                <span className="text-white font-medium">
+                  {selectedIds.length} selected
+                </span>
+                <div className="flex gap-6">
+                  <button
+                    className="text-gray-300 hover:text-white transition"
+                    onClick={() => {
+                      setSelectMode(false);
+                      setSelectedIds([]);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="text-red-400 hover:text-red-500 font-medium transition"
+                    onClick={() => handleDeleteMessages(selectedIds)}
+                  >
+                    Delete
+                  </button>
+                  <button
+                    className="text-blue-400 hover:text-blue-500 font-medium transition"
+                    onClick={() => setForwardModalOpen(true)}
+                  >
+                    Forward
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* ✅ Chat Messages */}
             <div
               ref={listRef}
               className="h-full overflow-y-auto scrollbar-telegram p-4 lg:p-6 space-y-4 lg:space-y-6"
@@ -2503,22 +2723,24 @@ useEffect(() => {
                   const isReadByPeer =
                     !isGroup && !!peerId && (m.readBy || []).includes(peerId);
 
+                  const isSelected = selectMode && selectedIds.includes(m.id);
+
                   return (
                     <div
                       key={m.id}
-                      className={`flex ${
-                        mine ? "justify-end" : "justify-start"
-                      }`}
+                      className={`flex ${mine ? "justify-end" : "justify-start"}
+                        transition-transform duration-200 ease-in-out`}
+                      // ✅ Touch hold for select mode
                       onTouchStart={(e) => {
                         touchStartX = e.touches[0].clientX;
                         touchStartY = e.touches[0].clientY;
                         touchMoveX = 0;
                         touchMoveY = 0;
-                        gestureLocked = null; // reset gesture type
+                        gestureLocked = null;
 
-                        // Prepare long press
                         holdTimer = setTimeout(() => {
-                          setDeleteConfirm({ open: true, message: m });
+                          setSelectMode(true);
+                          setSelectedIds([m.id]);
                         }, holdDuration);
                       }}
                       onTouchMove={(e) => {
@@ -2527,21 +2749,16 @@ useEffect(() => {
                         touchMoveX = e.touches[0].clientX - touchStartX;
                         touchMoveY = e.touches[0].clientY - touchStartY;
 
-                        // If gesture type not decided yet
                         if (gestureLocked === null) {
                           if (Math.abs(touchMoveY) > Math.abs(touchMoveX)) {
-                            gestureLocked = "vertical"; // scrolling → ignore swipes
+                            gestureLocked = "vertical";
                           } else if (Math.abs(touchMoveX) > 10) {
-                            gestureLocked = "horizontal"; // horizontal intent
+                            gestureLocked = "horizontal";
                           }
                         }
 
-                        if (gestureLocked === "vertical") {
-                          return; // 🚫 ignore swipe, let scroll happen
-                        }
-
                         if (gestureLocked === "horizontal") {
-                          const maxSwipe = 60; // limit bubble travel
+                          const maxSwipe = 50;
                           const limitedMoveX = Math.max(
                             -maxSwipe,
                             Math.min(maxSwipe, touchMoveX)
@@ -2556,10 +2773,6 @@ useEffect(() => {
                       }}
                       onTouchEnd={(e) => {
                         clearTimeout(holdTimer);
-
-                        const diffX = e.changedTouches[0].clientX - touchStartX;
-                        const diffY = e.changedTouches[0].clientY - touchStartY;
-
                         const bubble = document.getElementById(
                           `bubble-${m.id}`
                         );
@@ -2571,28 +2784,39 @@ useEffect(() => {
                           }, 200);
                         }
 
-                        // Only trigger swipe action if gesture was horizontal
-                        if (gestureLocked === "horizontal") {
+                        if (!selectMode && gestureLocked === "horizontal") {
+                          const diffX =
+                            e.changedTouches[0].clientX - touchStartX;
                           const triggerThreshold = 40;
-
                           if (diffX <= -triggerThreshold) {
-                            handleReplyTo(m); // left → reply
+                            setDeleteConfirm({ open: true, message: m });
                           } else if (diffX >= triggerThreshold) {
-                            setDeleteConfirm({ open: true, message: m }); // right → delete
+                            handleReplyTo(m);
                           }
                         }
-
-                        // Reset gesture lock
                         gestureLocked = null;
                       }}
                     >
                       <div
                         id={`bubble-${m.id}`}
-                        className={`max-w-[85%] sm:max-w-xs lg:max-w-md p-3 rounded-lg shadow-sm ${
-                          mine
-                            ? "bg-blue-700 text-white rounded-br-none"
-                            : "bg-[#1f2b38] text-[#e0e0e0] rounded-bl-none border border-white/5"
-                        }`}
+                        className={`relative max-w-[85%] sm:max-w-xs lg:max-w-md p-3 rounded-lg shadow-sm 
+    select-none transition-all duration-200 ease-in-out
+    ${
+      mine
+        ? "bg-blue-700 text-white rounded-br-none"
+        : "bg-[#1f2b38] text-[#e0e0e0] rounded-bl-none border border-white/5"
+    }
+    ${isSelected ? "ring-2 ring-blue-400 scale-[0.98]" : ""}`}
+                        // ✅ Click toggles select if in selectMode
+                        onClick={() => {
+                          if (selectMode) {
+                            setSelectedIds((prev) =>
+                              prev.includes(m.id)
+                                ? prev.filter((id) => id !== m.id)
+                                : [...prev, m.id]
+                            );
+                          }
+                        }}
                       >
                         {/* Sender name in groups */}
                         {isGroup && !mine && (
@@ -2637,7 +2861,8 @@ useEffect(() => {
                               <a
                                 href={m.imageUrl}
                                 download
-                                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 text-white px-2 py-1 rounded text-xs"
+                                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity 
+                                 bg-black/60 text-white px-2 py-1 rounded text-xs"
                                 onClick={(e) => e.stopPropagation()}
                               >
                                 Download
@@ -2659,17 +2884,35 @@ useEffect(() => {
                           }`}
                         >
                           <p className="text-[10px]">
-                            {formatTime(m.createdAt)}
+                            {m.pending
+                              ? "sending…"
+                              : m.failed
+                              ? "failed"
+                              : formatTime(m.createdAt)}
                           </p>
-                          {mine && !isGroup && (
-                            <span
-                              className={`material-symbols-outlined text-[16px] leading-none ${
-                                isReadByPeer ? "text-white" : ""
-                              }`}
-                              title={isReadByPeer ? "Read" : "Delivered"}
-                            >
-                              {isReadByPeer ? "done_all" : "done"}
-                            </span>
+                          {mine && (
+                            <>
+                              {m.pending && (
+                                <span className="material-symbols-outlined text-[14px] animate-spin">
+                                  autorenew
+                                </span>
+                              )}
+                              {!m.pending && !m.failed && !isGroup && (
+                                <span
+                                  className={`material-symbols-outlined text-[16px] leading-none ${
+                                    isReadByPeer ? "text-white" : ""
+                                  }`}
+                                  title={isReadByPeer ? "Read" : "Delivered"}
+                                >
+                                  {isReadByPeer ? "done_all" : "done"}
+                                </span>
+                              )}
+                              {m.failed && (
+                                <span className="material-symbols-outlined text-red-500 text-[16px]">
+                                  error
+                                </span>
+                              )}
+                            </>
                           )}
                         </div>
                       </div>
@@ -2679,7 +2922,7 @@ useEffect(() => {
               )}
             </div>
 
-            {/* Scroll-to-bottom button */}
+            {/* ✅ Scroll-to-bottom button stays above composer */}
             {showScrollToBottom && (
               <button
                 onClick={() => {
@@ -2690,11 +2933,9 @@ useEffect(() => {
                     });
                   }
                 }}
-                className={`absolute right-6 bottom-10 z-30 bg-blue-400 hover:bg-blue-700 text-white rounded-full p-3 shadow-lg transition-all duration-200 flex items-center justify-center ${
-                  showScrollToBottom
-                    ? "opacity-100 translate-y-0"
-                    : "opacity-0 translate-y-4 pointer-events-none"
-                }`}
+                className="absolute right-6 bottom-10 z-50 bg-blue-400 hover:bg-blue-600 
+                 text-white rounded-full p-3 shadow-lg transition-all duration-300
+                 flex items-center justify-center opacity-90 hover:opacity-100"
                 aria-label="Scroll to bottom"
               >
                 <span className="material-symbols-outlined text-lg">
@@ -2940,6 +3181,123 @@ useEffect(() => {
                 <span>Settings</span>
               </button>
             </nav>
+          </div>
+        </div>
+      )}
+
+      {forwardModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl bg-[#1f2b38] border border-gray-700 rounded-2xl shadow-xl p-4 max-h-[90vh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold text-white">Forward Messages</h2>
+              <button
+                className="p-1 rounded hover:bg-gray-700 flex items-center justify-center text-gray-300 hover:text-white"
+                onClick={() => setForwardModalOpen(false)}
+              >
+                ✖
+              </button>
+            </div>
+
+            {/* Search input */}
+            <div className="mb-3">
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search chats by name or username…"
+                className="w-full bg-[#18222d] rounded-md px-3 py-2 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-white"
+              />
+            </div>
+
+            {/* Chat list */}
+            <div className="bg-[#18222d] rounded-md border border-gray-700 max-h-80 overflow-y-auto divide-y divide-gray-700">
+              {rooms
+                .filter((r) => {
+                  const term = searchTerm.trim().toLowerCase();
+                  if (!term) return true;
+                  return (
+                    r.title?.toLowerCase().includes(term) ||
+                    getDMName(r)?.toLowerCase().includes(term)
+                  );
+                })
+                .map((r) => {
+                  const isSelected = forwardTargets.includes(r.id);
+                  const avatar =
+                    r.type === "group"
+                      ? r.avatarUrl || "/logo-swiftly.svg"
+                      : normalizeGooglePhotoURL(
+                          peerProfiles[r.memberIds?.find((id) => id !== me.uid)]
+                            ?.photoURL || "",
+                          40
+                        );
+                  const title =
+                    r.type === "group" ? r.title : getDMName(r) || "User";
+                  return (
+                    <div
+                      key={r.id}
+                      onClick={() => {
+                        setForwardTargets((prev) =>
+                          isSelected
+                            ? prev.filter((id) => id !== r.id)
+                            : [...prev, r.id]
+                        );
+                        setSearchTerm(""); // clear search after selection
+                      }}
+                      className={`flex items-center gap-3 p-2 cursor-pointer transition ${
+                        isSelected ? "bg-blue-600" : "hover:bg-gray-700"
+                      }`}
+                    >
+                      <img
+                        src={avatar}
+                        alt={title}
+                        className="h-10 w-10 rounded-full object-cover flex-shrink-0"
+                        onError={(e) =>
+                          (e.currentTarget.src = "/logo-swiftly.svg")
+                        }
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-white truncate">
+                          {title}
+                        </p>
+                        {r.type === "group" ? (
+                          <p className="text-xs text-gray-400">Group</p>
+                        ) : (
+                          <p className="text-xs text-gray-400">
+                            Direct Message
+                          </p>
+                        )}
+                      </div>
+                      {isSelected && (
+                        <span className="material-symbols-outlined text-white">
+                          check
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+
+            {/* Actions */}
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setForwardModalOpen(false)}
+                className="px-4 py-2 rounded-md bg-gray-700 text-gray-200 hover:bg-gray-600 transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleForwardMessages}
+                className={`px-4 py-2 rounded-md text-white transition ${
+                  forwardTargets.length > 0
+                    ? "bg-blue-600 hover:bg-blue-700"
+                    : "bg-gray-500 cursor-not-allowed"
+                }`}
+                disabled={forwardTargets.length === 0}
+              >
+                Send
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -3653,8 +4011,8 @@ useEffect(() => {
       )}
 
       {deleteConfirm.open && deleteConfirm.message && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-[#1f2b38] rounded-xl shadow-2xl w-full max-w-sm border border-gray-700 animate-fadeIn">
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-[#1f2b38] rounded-xl shadow-2xl w-full max-w-sm border border-gray-700">
             <div className="p-6 text-center">
               <div className="mx-auto flex items-center justify-center w-12 h-12 rounded-full bg-red-500/20 mb-4">
                 <span className="material-symbols-outlined text-red-400 text-3xl">
@@ -3680,64 +4038,77 @@ useEffect(() => {
 
                 {/* Confirm Delete */}
                 <button
-                  onClick={async () => {
+                  onClick={() => {
                     const msg = deleteConfirm.message;
 
-                    // 1️⃣ If this is media → delete from Supabase storage
-                    const mediaUrl =
-                      msg.type === "image"
-                        ? msg.imageUrl
-                        : msg.type === "audio"
-                        ? msg.audioUrl
-                        : null;
+                    // ✅ Add to exiting IDs: triggers CSS fade/scale transition
+                    setExitingIds((prev) => [...prev, msg.id]);
+                    setDeleteConfirm({ open: false, message: null }); // close modal instantly
 
-                    if (mediaUrl) {
+                    // After animation timeout, remove message from state completely
+                    setTimeout(() => {
+                      setMessages((prev) =>
+                        prev.filter((m) => m.id !== msg.id)
+                      );
+                      setExitingIds((prev) =>
+                        prev.filter((id) => id !== msg.id)
+                      );
+                    }, 300); // must match CSS duration
+
+                    // ⚙️ Background Firestore + media cleanup
+                    (async () => {
                       try {
-                        await deleteMediaFiles([mediaUrl]); // 👈 use your helper
-                        console.log("Deleted media file:", mediaUrl);
-                      } catch (err) {
-                        console.error(
-                          "Failed to delete media from Supabase:",
-                          err
+                        // 1. Delete media if needed
+                        const mediaUrl =
+                          msg.type === "image"
+                            ? msg.imageUrl
+                            : msg.type === "audio"
+                            ? msg.audioUrl
+                            : null;
+
+                        if (mediaUrl) {
+                          await deleteMediaFiles([mediaUrl]).catch((err) =>
+                            console.error("Supabase delete failed:", err)
+                          );
+                        }
+
+                        // 2. Delete Firestore doc
+                        await deleteDoc(
+                          doc(db, "rooms", activeRoomId, "messages", msg.id)
                         );
+
+                        // 3. Update room lastMessage preview
+                        const q = query(
+                          collection(db, "rooms", activeRoomId, "messages"),
+                          orderBy("createdAt", "desc"),
+                          limit(1)
+                        );
+                        const snap = await getDocs(q);
+
+                        if (!snap.empty) {
+                          const lastMsg = snap.docs[0].data();
+                          await updateDoc(doc(db, "rooms", activeRoomId), {
+                            lastMessageAt:
+                              lastMsg.createdAt || serverTimestamp(),
+                            lastMessagePreview:
+                              lastMsg.type === "text"
+                                ? lastMsg.text.slice(0, 80)
+                                : lastMsg.type === "image"
+                                ? "📷 Photo"
+                                : lastMsg.type === "audio"
+                                ? "🎤 Voice"
+                                : "Message",
+                          });
+                        } else {
+                          await updateDoc(doc(db, "rooms", activeRoomId), {
+                            lastMessageAt: serverTimestamp(),
+                            lastMessagePreview: "",
+                          });
+                        }
+                      } catch (err) {
+                        console.error("Background delete failed:", err);
                       }
-                    }
-
-                    // 2️⃣ Delete Firestore message doc
-                    await deleteDoc(
-                      doc(db, "rooms", activeRoomId, "messages", msg.id)
-                    );
-
-                    // 3️⃣ Update last preview in room doc
-                    const q = query(
-                      collection(db, "rooms", activeRoomId, "messages"),
-                      orderBy("createdAt", "desc"),
-                      limit(1)
-                    );
-                    const snap = await getDocs(q);
-
-                    if (!snap.empty) {
-                      const lastMsg = snap.docs[0].data();
-                      await updateDoc(doc(db, "rooms", activeRoomId), {
-                        lastMessageAt: lastMsg.createdAt || serverTimestamp(),
-                        lastMessagePreview:
-                          lastMsg.type === "text"
-                            ? lastMsg.text.slice(0, 80)
-                            : lastMsg.type === "image"
-                            ? "📷 Photo"
-                            : lastMsg.type === "audio"
-                            ? "🎤 Voice"
-                            : "Message",
-                      });
-                    } else {
-                      // no messages left
-                      await updateDoc(doc(db, "rooms", activeRoomId), {
-                        lastMessageAt: serverTimestamp(),
-                        lastMessagePreview: "",
-                      });
-                    }
-
-                    setDeleteConfirm({ open: false, message: null });
+                    })();
                   }}
                   className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white"
                 >
