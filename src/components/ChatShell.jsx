@@ -218,7 +218,7 @@ export function AudioBubble({ src, mine = false }) {
 }
 
 // ----------------- main -----------------
-export default function ChatShell({ me, meProfile, onLogout }) {
+export default function ChatShell({ me, meProfile, onLogout, initialRoomId  }) {
   const isMobile = useIsMobile();
 
   const [view, setView] = useState("chats"); // 'chats' | 'settings' | 'profile'
@@ -258,6 +258,14 @@ export default function ChatShell({ me, meProfile, onLogout }) {
 
   const [replyTo, setReplyTo] = useState(null);
   const [contextMenuMessageId, setContextMenuMessageId] = useState(null);
+
+
+  useEffect(() => {
+  if (initialRoomId) {
+    console.log("Opening room from notification:", initialRoomId);
+    setActiveRoomId(initialRoomId);
+  }
+}, [initialRoomId]);
 
   // common reply handler
   function handleReplyTo(message) {

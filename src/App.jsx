@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { auth, db, makeGoogleProvider } from './lib/firebase';
+import { auth, db, makeGoogleProvider, messaging } from './lib/firebase';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { setupPresence, updatePresence } from './lib/presence';
@@ -10,14 +10,14 @@ import ChatShell from './components/ChatShell';
 
 import { requestNotificationPermission } from "./lib/notifications";
 import { onMessage } from "firebase/messaging";
-import { messaging } from "./lib/firebase";
-
-
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  // New: track which room to auto-open from SW
+  const [pendingRoomId, setPendingRoomId] = useState(null);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
@@ -72,7 +72,6 @@ export default function App() {
     document.addEventListener('visibilitychange', onVis);
     window.addEventListener('beforeunload', toOffline);
 
-    // Optional: reflect network connectivity
     const onOnline = () => toOnline();
     const onOffline = () => toAway();
     window.addEventListener('online', onOnline);
@@ -90,24 +89,32 @@ export default function App() {
   }, [user?.uid]);
 
   useEffect(() => {
-  if (user) {
-    // ask once logged in
-    requestNotificationPermission(user);
-  }
-}, [user]);
+    if (user) {
+      requestNotificationPermission(user);
+    }
+  }, [user]);
 
-useEffect(() => {
-  const unsub = onMessage(messaging, (payload) => {
-    // console.log("Foreground push", payload);
+  // Foreground push
+  useEffect(() => {
+    const unsub = onMessage(messaging, (payload) => {
+      console.log("Foreground push", payload);
+      // In foreground, better to show in-app toast/snackbar, not system notification
+    });
+    return unsub;
+  }, []);
 
-    // new Notification(payload.notification?.title, {
-    //   body: payload.notification?.body,
-    //   icon: "/logo-swiftly.svg"
-    // });
-  });
-
-  return unsub;
-}, []);
+  // 🔑 Listen for notification-click messages from Service Worker
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("message", (event) => {
+        if (event.data?.type === "OPEN_ROOM") {
+          const { roomId } = event.data;
+          console.log("ServiceWorker requested open room:", roomId);
+          setPendingRoomId(roomId);
+        }
+      });
+    }
+  }, []);
 
   const signInGoogle = async () => {
     try {
@@ -133,9 +140,13 @@ useEffect(() => {
     );
   }
 
-  return <ChatShell 
-  me={user} 
-  meProfile={profile} 
-  onLogout={() => signOut(auth)} // This should be passed correctly
-/>;
+  return (
+    <ChatShell 
+      me={user} 
+      meProfile={profile} 
+      onLogout={() => signOut(auth)}
+      // 👉 Pass the roomId to ChatShell so it can auto-open after notification click:
+      initialRoomId={pendingRoomId}
+    />
+  );
 }

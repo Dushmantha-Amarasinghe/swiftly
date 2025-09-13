@@ -14,41 +14,44 @@ firebase.initializeApp({
 
 const messaging = firebase.messaging();
 
+// Background push → build custom notification
 messaging.onBackgroundMessage((payload) => {
   console.log("[Service Worker] Background push received:", payload);
 
   const data = payload.data || {};
 
-  // 👇 Use explicit fields sent from backend
   const title = data.title || data.senderName || data.roomTitle || "Swiftly";
   const body  = data.body  || "New message";
   const icon  = (data.senderPhoto && data.senderPhoto.startsWith("http"))
     ? data.senderPhoto
     : "/logo-swiftly.svg";
 
-  const options = {
+  self.registration.showNotification(title, {
     body,
     icon,
     badge: "/logo-swiftly.svg",
     data: { roomId: data.roomId }
-  };
-
-  self.registration.showNotification(title, options);
+  });
 });
+
+// Handle click on notification
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const roomId = event.notification.data?.roomId;
 
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then(list => {
-      for (const client of list) {
-        if (roomId && client.url.includes("/rooms/" + roomId) && "focus" in client) {
-          return client.focus();
-        }
+      // If app is already open → focus + tell it which chat
+      if (list.length > 0) {
+        const client = list[0];
+        client.focus();
+        client.postMessage({ type: "OPEN_ROOM", roomId });
+        return;
       }
-      return roomId
-        ? clients.openWindow("/rooms/" + roomId)
-        : clients.openWindow("/");
+      // Else cold start → open root
+      if (clients.openWindow) {
+        return clients.openWindow("/");
+      }
     })
   );
 });
