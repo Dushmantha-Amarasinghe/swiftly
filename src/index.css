@@ -1,0 +1,77 @@
+/* Tailwind v4: import once */
+@import "tailwindcss";
+
+/* App globals */
+html, body, #root { height: 100%; }
+
+:root {
+  /* Blue theme */
+  --primary-color: #3b82f6; /* try #2563eb for deeper */
+}
+*{
+  font-family: "Exo 2", sans-serif;
+}
+
+body {
+  font-family: "Exo 2", sans-serif;
+  
+}
+
+.material-symbols-outlined {
+font-variation-settings:
+'FILL' 0,
+'wght' 400,
+'GRAD' 0,
+'opsz' 40; /* 40–48 works well for a 32x32/128x128 circle */
+}
+
+.online-indicator {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 12px;
+  height: 12px;
+  background-color: #34d399;
+  border-radius: 50%;
+  border: 2px solid #18222d;
+}
+
+@layer utilities {
+  .scrollbar-telegram::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .scrollbar-telegram::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-telegram::-webkit-scrollbar-thumb {
+    background-color: rgba(100, 100, 100, 0.4);
+    border-radius: 10px;
+  }
+
+  .scrollbar-telegram::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(100, 100, 100, 0.6);
+  }
+
+  /* Firefox */
+  .scrollbar-telegram {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(100, 100, 100, 0.4) transparent;
+  }
+}
+
+/* Prevent iOS from zooming in on input focus */
+@media screen and (max-width: 768px) {
+  input, textarea {
+    font-size: 16px !important; /* Prevent iOS zoom */
+  }
+}
+
+/* Keyboard avoidance for mobile */
+@supports (padding: max(0px)) {
+  .keyboard-avoidance {
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+}
+

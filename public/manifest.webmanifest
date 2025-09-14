@@ -1,0 +1,26 @@
+{
+"name": "Swiftly",
+"short_name": "Swiftly",
+"description": "Fast, modern chat.",
+"id": "/",
+"start_url": "/?source=pwa",
+"scope": "/",
+"display": "standalone",
+"orientation": "portrait",
+"background_color": "#18222d",
+"theme_color": "#18222d",
+"icons": [
+{
+"src": "/icons/manifest-icon-192.maskable.png",
+"sizes": "192x192",
+"type": "image/png",
+"purpose": "any maskable"
+},
+{
+"src": "/icons/manifest-icon-512.maskable.png",
+"sizes": "512x512",
+"type": "image/png",
+"purpose": "any maskable"
+}
+]
+}
