@@ -9,11 +9,10 @@ const firebaseConfig = {
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
   // Not always included by default – add it in .env.local
   databaseURL: import.meta.env.VITE_FIREBASE_DB_URL,
-  messagingSenderId: "251177712115",
-
 };
 
 const app = initializeApp(firebaseConfig);
