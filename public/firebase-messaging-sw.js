@@ -2,35 +2,43 @@
 importScripts("https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js");
 importScripts("https://www.gstatic.com/firebasejs/9.23.0/firebase-messaging-compat.js");
 
-firebase.initializeApp({
-  apiKey: "AIzaSyB2wfxDBNWVdP5yknK6M6jGtVmb3l8Bcxs",
-  authDomain: "swiftly-70a5b.firebaseapp.com",
-  databaseURL: "https://swiftly-70a5b-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "swiftly-70a5b",
-  storageBucket: "swiftly-70a5b.firebasestorage.app",
-  messagingSenderId: "251177712115",
-  appId: "1:251177712115:web:52429a7d0b5ba96ef17a86"
-});
+async function loadConfig() {
+  try {
+    const res = await fetch("/firebase-sw-config.json", { cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
 
-const messaging = firebase.messaging();
+// Background push is enabled only when local runtime config is present.
+loadConfig().then((config) => {
+  if (!config) {
+    console.warn("[Service Worker] Missing /firebase-sw-config.json. Background notifications disabled.");
+    return;
+  }
 
-// Background push → build custom notification
-messaging.onBackgroundMessage((payload) => {
-  console.log("[Service Worker] Background push received:", payload);
+  firebase.initializeApp(config);
+  const messaging = firebase.messaging();
 
-  const data = payload.data || {};
+  messaging.onBackgroundMessage((payload) => {
+    console.log("[Service Worker] Background push received:", payload);
 
-  const title = data.title || data.senderName || data.roomTitle || "Swiftly";
-  const body  = data.body  || "New message";
-  const icon  = (data.senderPhoto && data.senderPhoto.startsWith("http"))
-    ? data.senderPhoto
-    : "/logo-swiftly.svg";
+    const data = payload.data || {};
+    const title = data.title || data.senderName || data.roomTitle || "Swiftly";
+    const body = data.body || "New message";
+    const icon =
+      data.senderPhoto && data.senderPhoto.startsWith("http")
+        ? data.senderPhoto
+        : "/logo-swiftly.svg";
 
-  self.registration.showNotification(title, {
-    body,
-    icon,
-    badge: "/logo-swiftly.svg",
-    data: { roomId: data.roomId }
+    self.registration.showNotification(title, {
+      body,
+      icon,
+      badge: "/logo-swiftly.svg",
+      data: { roomId: data.roomId },
+    });
   });
 });
 
