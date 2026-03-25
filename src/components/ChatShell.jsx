@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { saveData, loadData } from "../lib/cache";
+import CachedAvatar from "./CachedAvatar";
 import {
   collection,
   doc,
@@ -29,6 +31,8 @@ import {
   subscribeTyping,
 } from "../lib/presence";
 import { uploadAvatar, deleteMediaFiles } from "../lib/storage";
+import CachedImage from "./CachedImage";
+import CachedAudio from "./CachedAudio";
 
 // ----------------- helpers -----------------
 function normalizeGooglePhotoURL(url, size = 56) {
@@ -645,15 +649,25 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
 
   // Load friends from existing DMs
   useEffect(() => {
+    let mounted = true;
+
     const loadFriends = async () => {
       setLoadingFriends(true);
       try {
+        // 1️⃣ Try load cached immediately
+        const cached = await loadData("friends");
+        if (cached && mounted) {
+          setFriends(cached);
+        }
+
+        // 2️⃣ Fresh Firestore query
         const qRooms = query(
           collection(db, "rooms"),
           where("memberIds", "array-contains", me.uid),
           where("type", "==", "dm")
         );
         const snap = await getDocs(qRooms);
+
         const friendIds = new Set();
         snap.docs.forEach((d) => {
           const room = d.data();
@@ -661,20 +675,33 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
             if (id !== me.uid) friendIds.add(id);
           });
         });
+
+        // parallel fetch profiles
         const friendDocs = await Promise.all(
           Array.from(friendIds).map((uid) => getDoc(doc(db, "profiles", uid)))
         );
+
         const list = friendDocs
           .filter((s) => s.exists())
           .map((s) => ({ id: s.id, ...s.data() }));
-        setFriends(list);
+
+        if (mounted) {
+          setFriends(list);
+          // 3️⃣ Save to cache
+          await saveData("friends", list);
+        }
       } catch (e) {
         console.error("Error loading friends:", e);
       } finally {
-        setLoadingFriends(false);
+        if (mounted) setLoadingFriends(false);
       }
     };
+
     loadFriends();
+
+    return () => {
+      mounted = false;
+    };
   }, [me.uid, rooms]);
 
   // Unread notifications (unchanged core)
@@ -837,6 +864,7 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
   }
 
   const [groupSearchTerm, setGroupSearchTerm] = useState("");
+
   useEffect(() => {
     const searchUsers = async () => {
       const term = groupSearchTerm.trim().toLowerCase();
@@ -844,6 +872,13 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
         setResults([]);
         return;
       }
+
+      // 1️⃣ Try cached search first
+      const cached = await loadData(`search_${term}`);
+      if (cached) {
+        setResults(cached);
+      }
+
       setSearching(true);
       try {
         const qUsers = query(
@@ -857,11 +892,16 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
         const list = snap.docs
           .map((d) => ({ id: d.id, ...d.data() }))
           .filter((p) => p.setupComplete && p.uid !== me.uid);
+
         setResults(list);
+
+        // 2️⃣ Cache result
+        await saveData(`search_${term}`, list);
       } finally {
         setSearching(false);
       }
     };
+
     const t = setTimeout(searchUsers, 250);
     return () => clearTimeout(t);
   }, [groupSearchTerm, me.uid]);
@@ -885,39 +925,84 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
 
   // rooms
   useEffect(() => {
+    let mounted = true;
     setLoadingRooms(true);
+
+    // 1️⃣ Load cached rooms immediately
+    (async () => {
+      const cachedRooms = await loadData("rooms");
+      if (cachedRooms && mounted) {
+        setRooms(cachedRooms);
+        setLoadingRooms(false);
+      }
+
+      // Also preload cached peerProfiles if you want:
+      const cachedProfiles = await loadData("peerProfiles");
+      if (cachedProfiles && mounted) {
+        setPeerProfiles((prev) => ({ ...prev, ...cachedProfiles }));
+      }
+    })();
+
+    // 2️⃣ Subscribe to Firestore live updates
     const qRooms = query(
       collection(db, "rooms"),
       where("memberIds", "array-contains", me.uid)
     );
+
     const unsub = onSnapshot(qRooms, async (snap) => {
       const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+      // Sort by lastMessageAt desc
       list.sort((a, b) => {
         const ta = a.lastMessageAt?.toMillis?.() ?? 0;
         const tb = b.lastMessageAt?.toMillis?.() ?? 0;
         return tb - ta;
       });
-      setRooms(list);
-      setLoadingRooms(false);
+
+      if (mounted) {
+        setRooms(list);
+        setLoadingRooms(false);
+      }
+
+      // 3️⃣ Cache these rooms
+      await saveData("rooms", list);
+
+      // 4️⃣ Handle peer profiles (per DM/Group member)
       const toFetch = new Set();
       list.forEach((r) => {
-        if (Array.isArray(r.memberIds))
+        if (Array.isArray(r.memberIds)) {
           r.memberIds.forEach((id) => {
-            if (id !== me.uid && !peerProfiles[id]) toFetch.add(id);
+            if (id !== me.uid && !peerProfiles[id]) {
+              toFetch.add(id);
+            }
           });
+        }
       });
+
       if (toFetch.size) {
         const batch = await Promise.all(
           Array.from(toFetch).map((uid) => getDoc(doc(db, "profiles", uid)))
         );
+
         const map = {};
         batch.forEach((s) => {
           if (s.exists()) map[s.id] = s.data();
         });
-        setPeerProfiles((prev) => ({ ...prev, ...map }));
+
+        if (mounted) {
+          setPeerProfiles((prev) => ({ ...prev, ...map }));
+        }
+
+        // Cache peer profiles too
+        const cachedProfiles = (await loadData("peerProfiles")) || {};
+        await saveData("peerProfiles", { ...cachedProfiles, ...map });
       }
     });
-    return unsub;
+
+    return () => {
+      mounted = false;
+      unsub();
+    };
     // eslint-disable-next-line
   }, [me.uid]);
 
@@ -937,20 +1022,47 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
 
   // messages of active room
   useEffect(() => {
+    let mounted = true;
+
     if (!activeRoomId || view !== "chats") {
       setMessages([]);
       return;
     }
+
+    // 1️⃣ Load cached messages instantly
+    (async () => {
+      const cached = await loadData(`messages_${activeRoomId}`);
+      if (cached && mounted) {
+        setMessages(cached);
+      }
+    })();
+
+    // 2️⃣ Subscribe to Firestore live updates
     const qMsgs = query(
       collection(db, "rooms", activeRoomId, "messages"),
       orderBy("createdAt", "asc"),
       limit(400)
     );
-    const unsub = onSnapshot(qMsgs, (snap) => {
-      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+    const unsub = onSnapshot(qMsgs, async (snap) => {
+      if (!mounted) return;
+
+      const list = snap.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+      }));
+
       setMessages(list);
+
+      // 3️⃣ Save snapshot into cache
+      await saveData(`messages_${activeRoomId}`, list);
+      await saveData(`lastSync_${activeRoomId}`, Date.now());
     });
-    return unsub;
+
+    return () => {
+      mounted = false;
+      unsub();
+    };
   }, [activeRoomId, view]);
 
   // scroll watcher
@@ -1457,26 +1569,73 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
   async function sendAttachedPhotos() {
     if (!activeRoomId || !attachFiles.length) return;
     setUploading(true);
+
     try {
       for (const f of attachFiles) {
-        const imageUrl = await uploadAvatar(f, me.uid);
-        await addDoc(collection(db, "rooms", activeRoomId, "messages"), {
+        const tempId = "temp-" + Date.now();
+
+        // 1️⃣ Optimistic bubble with local preview
+        const localUrl = URL.createObjectURL(f);
+        const pendingMsg = {
+          id: tempId,
           senderId: me.uid,
           type: "image",
-          imageUrl,
-          createdAt: serverTimestamp(),
-        });
+          imageUrl: localUrl,
+          createdAt: new Date(),
+          readBy: [me.uid],
+          pending: true,
+        };
+        setMessages((prev) => [...prev, pendingMsg]);
+
+        // 2️⃣ Upload to storage
+        const imageUrl = await uploadAvatar(f, me.uid);
+
+        // 3️⃣ Save to Firestore
+        const msgRef = await addDoc(
+          collection(db, "rooms", activeRoomId, "messages"),
+          {
+            senderId: me.uid,
+            type: "image",
+            imageUrl,
+            createdAt: serverTimestamp(),
+            readBy: [me.uid],
+          }
+        );
+
+        // 4️⃣ Cache media file offline
+        await saveMedia(imageUrl, f);
+
+        // 5️⃣ Update room with last message info
         await updateDoc(doc(db, "rooms", activeRoomId), {
           lastMessageAt: serverTimestamp(),
-          lastMessagePreview: "Photo",
+          lastMessagePreview: "📷 Photo",
         });
+
+        // 6️⃣ Replace optimistic local message with real Firestore one
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === tempId
+              ? { ...m, id: msgRef.id, imageUrl, pending: false }
+              : m
+          )
+        );
       }
+
       setAttachFiles([]);
       setAttachModal(false);
-      if (listRef.current)
+
+      // Scroll down
+      if (listRef.current) {
         setTimeout(() => {
           listRef.current.scrollTop = listRef.current.scrollHeight;
         }, 0);
+      }
+    } catch (err) {
+      console.error("sendAttachedPhotos failed:", err);
+      // Optional: mark temp messages failed
+      setMessages((prev) =>
+        prev.map((m) => (m.pending ? { ...m, failed: true } : m))
+      );
     } finally {
       setUploading(false);
     }
@@ -1747,6 +1906,11 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
 
   const [editingMessage, setEditingMessage] = useState(null);
   function handleEditMessage(message) {
+    // 🔒 Only allow if it's my message
+    if (message.senderId !== me.uid) {
+      return; // Do nothing if it's not your own
+    }
+
     // Limit: only allow edit if created within 1h
     const createdAt = message.createdAt?.toDate
       ? message.createdAt.toDate()
@@ -1754,6 +1918,7 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
     const ageMinutes = (Date.now() - createdAt.getTime()) / 60000;
 
     if (ageMinutes > 60) {
+      // Show small warning instead of alert
       setMessages((prev) =>
         prev.map((m) =>
           m.id === message.id ? { ...m, showEditWarning: true } : m
@@ -1765,14 +1930,16 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
             m.id === message.id ? { ...m, showEditWarning: false } : m
           )
         );
-      }, 3000); // auto hide after 3s
+      }, 3000);
       return;
     }
 
+    // 🚀 Open edit mode
     setText(message.text || "");
     setReplyTo(null);
     setEditingMessage(message);
-    setTimeout(() => inputRef.current?.focus(), 0);
+    setShowSendButton(true); // enable send button
+    setTimeout(() => inputRef.current?.focus(), 0); // focus input
   }
   // ----------------- UI -----------------
   return (
@@ -1878,21 +2045,18 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
           ) : (
             <ul className="divide-y divide-gray-700">
               {rooms.map((r) => {
-                // --- Room basics ---
                 const active = r.id === activeRoomId && view === "chats";
                 const title = roomTitle(r);
                 const avatar = roomAvatar(r);
                 const time = formatTime(r.lastMessageAt);
                 const last = r.lastMessagePreview || "";
 
-                // --- DM peer presence ---
                 const pid =
                   r.type === "dm"
                     ? r.memberIds?.find((id) => id !== me.uid)
                     : null;
                 const isOnline = pid && presence[pid]?.state === "online";
 
-                // --- Unread logic ---
                 const isActiveViewer =
                   r.id === activeRoomId &&
                   view === "chats" &&
@@ -1920,14 +2084,10 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
                     {/* Avatar */}
                     <div className="relative flex-shrink-0">
                       {avatar ? (
-                        <img
-                          src={avatar}
+                        <CachedAvatar
+                          url={avatar}
                           alt={title}
                           className="h-14 w-14 rounded-full object-cover ring-2 ring-[#1f2b38]"
-                          referrerPolicy="no-referrer"
-                          onError={(e) => {
-                            e.currentTarget.src = "/logo-swiftly.svg";
-                          }}
                         />
                       ) : (
                         <div className="h-14 w-14 rounded-full bg-gray-700 grid place-items-center font-semibold ring-2 ring-[#1f2b38]">
@@ -2042,11 +2202,10 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
                   <>
                     <div className="relative mr-3">
                       {activeRoom.avatarUrl ? (
-                        <img
-                          src={activeRoom.avatarUrl}
-                          alt=""
+                        <CachedAvatar
+                          url={activeRoom.avatarUrl}
+                          alt={activeRoom.title || "Group"}
                           className="h-10 w-10 rounded-full object-cover ring-2 ring-[#1f2b38]"
-                          referrerPolicy="no-referrer"
                         />
                       ) : (
                         <div className="h-10 w-10 rounded-full bg-gray-700 grid place-items-center font-semibold ring-2 ring-[#1f2b38]">
@@ -2088,14 +2247,10 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
                   <>
                     <div className="relative mr-3">
                       {peerAvatar ? (
-                        <img
-                          src={peerAvatar}
-                          alt=""
+                        <CachedAvatar
+                          url={peerAvatar}
+                          alt={peer?.displayName || peer?.username || "User"}
                           className="h-10 w-10 rounded-full object-cover ring-2 ring-[#1f2b38]"
-                          referrerPolicy="no-referrer"
-                          onError={(e) => {
-                            e.currentTarget.src = "/logo-swiftly.svg";
-                          }}
                         />
                       ) : (
                         <div className="h-10 w-10 rounded-full bg-gray-700 grid place-items-center font-semibold ring-2 ring-[#1f2b38]">
@@ -2365,9 +2520,10 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
                                 </div>
                               </div>
                             )}
+
                             {m.type === "audio" && (
                               <div className="mt-1">
-                                <AudioBubble src={m.audioUrl} mine={mine} />
+                                <CachedAudio url={m.audioUrl} mine={mine} />
                               </div>
                             )}
 
@@ -2452,14 +2608,18 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
                                 >
                                   Reply
                                 </button>
-                                <button
-                                  onClick={() => {
-                                    handleEditMessage(m);
-                                  }}
-                                  className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm"
-                                >
-                                  Edit
-                                </button>
+                                {/* 👇 Only show Edit if it's my message */}
+                                {mine && (
+                                  <button
+                                    onClick={() => {
+                                      handleEditMessage(m);
+                                      setContextMenuMessageId(null);
+                                    }}
+                                    className="block w-full text-left px-3 py-1 hover:bg-gray-700 text-sm"
+                                  >
+                                    Edit
+                                  </button>
+                                )}
                                 <button
                                   onClick={() => {
                                     setForwardModalOpen(true);
@@ -2701,13 +2861,12 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
             {activeRoom?.type === "group" ? (
               <>
                 <div className="relative mr-3">
-                  {activeRoom.avatarUrl ? (
-                    <img
-                      src={activeRoom.avatarUrl}
-                      alt=""
-                      className="h-10 w-10 rounded-full object-cover ring-2 ring-[#1f2b38]"
-                      referrerPolicy="no-referrer"
-                    />
+  {activeRoom.avatarUrl ? (
+    <CachedAvatar
+      url={activeRoom.avatarUrl}
+      alt={activeRoom.title || "Group"}
+      className="h-10 w-10 rounded-full object-cover ring-2 ring-[#1f2b38]"
+    />
                   ) : (
                     <div className="h-10 w-10 rounded-full bg-gray-700 grid place-items-center font-semibold ring-2 ring-[#1f2b38]">
                       {(activeRoom.title || "G").slice(0, 1)}
@@ -2747,16 +2906,12 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
             ) : (
               <>
                 <div className="relative mr-3">
-                  {peerAvatar ? (
-                    <img
-                      src={peerAvatar}
-                      alt=""
-                      className="h-10 w-10 rounded-full object-cover ring-2 ring-[#1f2b38]"
-                      referrerPolicy="no-referrer"
-                      onError={(e) => {
-                        e.currentTarget.src = "/logo-swiftly.svg";
-                      }}
-                    />
+  {peerAvatar ? (
+    <CachedAvatar
+      url={peerAvatar}
+      alt={peer?.displayName || peer?.username || "User"}
+      className="h-10 w-10 rounded-full object-cover ring-2 ring-[#1f2b38]"
+    />
                   ) : (
                     <div className="h-10 w-10 rounded-full bg-gray-700 grid place-items-center font-semibold ring-2 ring-[#1f2b38]">
                       {(peer?.displayName || peer?.username || "U").slice(0, 1)}
@@ -3051,33 +3206,36 @@ export default function ChatShell({ me, meProfile, onLogout, initialRoomId }) {
 
                         {m.type === "image" && (
                           <div className="mt-1">
-                            <div className="relative group overflow-hidden rounded-lg bg-black/20 w-[240px] h-[180px] sm:w-[260px] sm:h-[195px]">
-                              <img
-                                src={m.imageUrl}
-                                alt=""
-                                loading="lazy"
-                                className="absolute inset-0 h-full w-full object-cover cursor-pointer"
-                                onClick={() =>
-                                  setLightbox({ open: true, url: m.imageUrl })
-                                }
-                                referrerPolicy="no-referrer"
-                              />
-                              <a
-                                href={m.imageUrl}
-                                download
-                                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity 
-                                 bg-black/60 text-white px-2 py-1 rounded text-xs"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                Download
-                              </a>
-                            </div>
-                          </div>
+                                <div className="relative group overflow-hidden rounded-lg bg-black/20 w-[240px] h-[180px] sm:w-[260px] sm:h-[195px]">
+                                  <img
+                                    src={m.imageUrl}
+                                    alt=""
+                                    loading="lazy"
+                                    className="absolute inset-0 h-full w-full object-cover cursor-pointer"
+                                    onClick={() =>
+                                      setLightbox({
+                                        open: true,
+                                        url: m.imageUrl,
+                                      })
+                                    }
+                                    referrerPolicy="no-referrer"
+                                  />
+                                  <a
+                                    href={m.imageUrl}
+                                    download
+                                    className="absolute top-2 right-2 opacity-0 group-hover:opacity-100
+                                 transition-opacity bg-black/60 text-white px-2 py-1 rounded text-xs"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    Download
+                                  </a>
+                                </div>
+                              </div>
                         )}
 
                         {m.type === "audio" && (
                           <div className="mt-1">
-                            <AudioBubble src={m.audioUrl} mine={mine} />
+                            <CachedAudio url={m.audioUrl} mine={mine} />
                           </div>
                         )}
 
